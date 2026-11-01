@@ -165,7 +165,7 @@ MIT/Apache; we can fix that along the way in a PR.
      rejected sound parts (exact and mesh volumes agreed to 6e-6). A face is now reported
      only when its second largest triangle's centroid agrees.
 10. **Conoid surfaces: done** (branch `feat/conoid`, merged into `integration/3.0` as
-    `208a416`; not opened upstream yet).
+    `208a416`; upstream PR #43 from `pr/conoid`, stacked on #36, #38 and #40).
    - `SurfaceGeometry::Conoid { frame, c }`: S(u, v) = O + v (cos u x + sin u y) +
      (c0 + c1 cos u + c2 sin u) z, UV = (angle, radius): radial rulings over a cylinder axis.
      A bend mitered at a corner ends on one, cut square to the sheet.
