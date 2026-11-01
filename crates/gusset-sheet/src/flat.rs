@@ -231,10 +231,11 @@ enum End {
         /// The bend runs on past q to its flange's end (a small round or
         /// square relief); the base still ends at q.
         run_on: RunOn,
-        /// A run-on bend's end turns onto the relief: at its centre, and
-        /// where its end line first meets it. The bends split along q to the
-        /// centre; the relief cuts the rest.
-        turn: (P2, P2),
+        /// A run-on bend's end turns onto the relief: its centre, where the
+        /// end meets it, and the end's own corner before that (the meeting
+        /// point when it meets the end line itself). The bends split along q
+        /// to the centre; the relief cuts the rest.
+        turn: (P2, P2, P2),
     },
 }
 
@@ -729,7 +730,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     short: None,
                     shape: CornerShape::TrimToBend,
                     run_on: RunOn::No,
-                    turn: (q, q),
+                    turn: (q, q, q),
                 };
                 continue;
             }
@@ -805,7 +806,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             // flanges' first corners; then at that circle's centre. Clipped
             // once per corner.
             let mut run_on = RunOn::No;
-            let mut turn = (q, q);
+            let mut turn = (q, q, q);
             let mut shape = shape;
             if matches!(shape, CornerShape::Round | CornerShape::Square) {
                 let size = relief
@@ -926,13 +927,20 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                         centre = x;
                         clip = clip_at(x);
                     }
+                    // A capped one the end line doesn't reach before the bend
+                    // start line (a sharp corner of sloped flanges): its end
+                    // takes another line there (not built).
                     let Some(met) = meet(&clip) else {
-                        return unsupported("a corner relief over its flange's first corner");
+                        return unsupported(if capped {
+                            "a capped corner relief its flanges' end lines don't reach"
+                        } else {
+                            "a corner relief over its flange's first corner"
+                        });
                     };
-                    turn = (centre, met);
+                    turn = (centre, met, met);
                     // A capped square short of the flange's first corner:
                     // the bend's end would follow the miter there (not built).
-                    if capped && !covers(&clip, first) {
+                    if capped && shape == CornerShape::Square && !covers(&clip, first) {
                         return unsupported(
                             "a square corner relief too large to touch q and too small to reach past the bend",
                         );
@@ -1273,7 +1281,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     CornerShape::Tear => vec![meet((i + n - 1) % n)],
                     CornerShape::LinearWeld => vec![at(i, b0, st.setback), at(i, f0, be)],
                     // Bends run on: their ends cross on the symmetry plane.
-                    _ if run_on != RunOn::No => vec![turn.0, turn.1, at(i, f0, be)],
+                    _ if run_on != RunOn::No => vec![turn.0, turn.1, turn.2, at(i, f0, be)],
                     _ => vec![at(i, b0, st.setback), at(i, b0, be), at(i, f0, be)],
                 };
                 for p in pieces {
@@ -1319,7 +1327,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 let pieces = match shape {
                     CornerShape::Tear => vec![meet(i)],
                     CornerShape::LinearWeld => vec![at(i, f1, be), at(i, b1, st.setback)],
-                    _ if run_on != RunOn::No => vec![at(i, f1, be), turn.1, turn.0],
+                    _ if run_on != RunOn::No => vec![at(i, f1, be), turn.2, turn.1, turn.0],
                     _ => vec![at(i, f1, be), at(i, b1, be), at(i, b1, st.setback)],
                 };
                 for p in pieces {
@@ -1445,9 +1453,9 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         let start = |side: usize, t: f64| match sides[i][side] {
             End::Corner { turn, .. } if run_on(side) => {
                 if side == 0 {
-                    vec![turn.0, turn.1]
+                    vec![turn.0, turn.1, turn.2]
                 } else {
-                    vec![turn.1, turn.0]
+                    vec![turn.2, turn.1, turn.0]
                 }
             }
             _ => vec![at(i, t, fold.s0)],
@@ -1538,12 +1546,15 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         // A run-on bend's line runs to its end: the end line, then the turn
         // onto the relief (which then cuts it).
         let ends = |side: usize, f: f64| -> f64 {
-            let End::Corner { turn: (c, h), .. } = sides[i][side] else {
+            let End::Corner {
+                turn: (c, h, v), ..
+            } = sides[i][side]
+            else {
                 return f;
             };
             let p0 = at(i, 0.0, centre);
             let u = sub(at(i, 1.0, centre), p0);
-            for (a, b) in [(at(i, f, fold_bend_end), h), (h, c)] {
+            for (a, b) in [(at(i, f, fold_bend_end), v), (v, h), (h, c)] {
                 let d = sub(b, a);
                 let den = cross2(u, d);
                 if den.abs() < EPS {

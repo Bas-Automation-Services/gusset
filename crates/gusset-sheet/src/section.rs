@@ -121,6 +121,9 @@ mod tests {
             (135.0, Tangent, Outside, 87.76891744779238),
             (135.0, OuterOrtho, Outside, 94.53847006949287),
             (135.0, InnerOrtho, Outside, 99.36689719423903),
+            // Inside: the flange's outer face crosses the inner plane at the edge.
+            (45.0, Outer, Inside, 86.88540635852809),
+            (135.0, Outer, Inside, 79.28363607355381),
         ] {
             let w = width(angle, datum, position);
             assert!(

@@ -1855,6 +1855,47 @@ mod corner_relief_tests {
     }
 
     #[test]
+    fn small_corner_reliefs_at_sloped_flanges_follow_the_flanges_end_lines() {
+        let spec = |angle: f64, size: f64| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{ "id": "t", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                     "relief": {{ "width": 2, "depth": 1, "minimum_remnant": 4,
+                                  "corner": {{ "shape": "round", "size": {size} }} }},
+                     "base": {{ "outline": [[0,0],[100,0],[100,60],[0,60]] }},
+                     "flanges": [
+                       {{ "id": "f1", "on": {{ "base": 1 }}, "angle": {angle}, "length": 30,
+                          "datum": "outer", "position": "outside", "side": "up" }},
+                       {{ "id": "f2", "on": {{ "base": 2 }}, "angle": {angle}, "length": 30,
+                          "datum": "outer", "position": "outside", "side": "up" }}] }}"#
+            ))
+            .unwrap()
+        };
+        let centre = |angle: f64, size: f64| {
+            let flat = crate::flat::flat_pattern(&spec(angle, size)).unwrap();
+            flat.outline_arcs.iter().flatten().next().unwrap().center
+        };
+        // 135 degrees: on the bisector, its circle through q (95.171573,
+        // 55.171573), reaching the flanges' end lines.
+        let c = centre(135.0, 4.0);
+        assert!(
+            (c[0] - 96.585786).abs() < 1e-6 && (c[1] - 56.585786).abs() < 1e-6,
+            "{c:?}"
+        );
+        // 45 degrees: the end lines cross in the base, behind q; a relief
+        // that doesn't reach them is centred there, whatever its size, and cut
+        // from the flat only.
+        for size in [1.5, 2.8] {
+            let c = centre(45.0, size);
+            assert!(
+                (c[0] - 93.86244).abs() < 1e-5 && (c[1] - 53.86244).abs() < 1e-5,
+                "{c:?}"
+            );
+            let m = exact_mass(&spec(45.0, size)).unwrap();
+            assert!((m.volume - 22594.42182753766).abs() < 1e-3, "{}", m.volume);
+        }
+    }
+
+    #[test]
     fn a_tear_relief_is_a_hairline_notch_in_3d_and_none_in_the_flat() {
         let spec: PartSpec = serde_json::from_str(
             r#"{ "id": "t", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
