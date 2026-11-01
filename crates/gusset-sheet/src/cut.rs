@@ -3,7 +3,7 @@
 //! crosses loses the disc (its boundary follows the circle there, and it may
 //! split into pieces); a cell that holds it whole gets it as an inner loop.
 
-use crate::flat::{path_area, Arc, Cell, FlatPattern, Layout, Ring, P2};
+use crate::flat::{path_area, Arc, Cell, Curve, FlatPattern, Layout, Ring, P2};
 use crate::spec::Hole;
 use crate::SheetError;
 
@@ -40,7 +40,7 @@ pub(crate) fn crosses_outline(flat: &FlatPattern, h: &Hole) -> bool {
     let (pts, arcs) = (&flat.outline, &flat.outline_arcs);
     (0..pts.len()).any(|k| {
         let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
-        let d = match arcs[k] {
+        let d = match arc(arcs[k]) {
             None => segment_distance(h.center, p, q),
             Some(arc) => arc_distance(h.center, p, q, arc),
         };
@@ -63,7 +63,7 @@ fn check(flat: &FlatPattern, h: &Hole) -> Result<(), SheetError> {
     let (pts, arcs) = (&flat.outline, &flat.outline_arcs);
     for k in 0..pts.len() {
         let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
-        let d = match arcs[k] {
+        let d = match arc(arcs[k]) {
             None => segment_distance(h.center, p, q),
             Some(arc) => arc_distance(h.center, p, q, arc),
         };
@@ -110,7 +110,7 @@ impl Clip {
             Clip::Disc { c, r } => (dist(p, *c) - r).abs() <= EPS,
             Clip::Profile(ring) => (0..ring.points.len()).any(|k| {
                 let (a, b) = segment(ring, k);
-                match ring.arcs[k] {
+                match arc(ring.arcs[k]) {
                     None => segment_distance(p, a, b) <= EPS,
                     Some(arc) => arc_distance(p, a, b, arc) <= EPS,
                 }
@@ -134,7 +134,7 @@ impl Clip {
                         // Through a corner of the profile.
                         return Err(());
                     }
-                    match ring.arcs[k] {
+                    match arc(ring.arcs[k]) {
                         None => {
                             let e = sub(c1, c0);
                             let den = cross(d, e);
@@ -193,21 +193,23 @@ impl Clip {
 
     /// The boundary clockwise from e to l, as path pieces: e first, each
     /// point with the segment that leaves it.
-    fn clockwise(&self, e: P2, l: P2, pts: &mut Vec<P2>, arcs: &mut Vec<Option<Arc>>) {
+    fn clockwise(&self, e: P2, l: P2, pts: &mut Vec<P2>, arcs: &mut Vec<Option<Curve>>) {
         match self {
             Clip::Disc { c, .. } => {
                 pts.push(e);
-                arcs.push(Some(Arc {
+                arcs.push(Some(Curve::Arc(Arc {
                     center: *c,
                     ccw: false,
-                }));
+                })));
             }
             Clip::Profile(ring) => {
                 let n = ring.points.len();
                 let reverse = |k: usize| {
-                    ring.arcs[k].map(|a| Arc {
-                        center: a.center,
-                        ccw: !a.ccw,
+                    arc(ring.arcs[k]).map(|a| {
+                        Curve::Arc(Arc {
+                            center: a.center,
+                            ccw: !a.ccw,
+                        })
                     })
                 };
                 let (mut k, le) = locate(ring, e);
@@ -239,7 +241,7 @@ fn segment(ring: &Ring, k: usize) -> (P2, P2) {
 
 fn segment_length(ring: &Ring, k: usize) -> f64 {
     let (a, b) = segment(ring, k);
-    match ring.arcs[k] {
+    match arc(ring.arcs[k]) {
         None => dist(a, b),
         Some(arc) => dist(a, arc.center) * arc.sweep(a, b).abs(),
     }
@@ -259,7 +261,7 @@ fn locate(ring: &Ring, p: P2) -> (usize, f64) {
     let mut best = (f64::MAX, 0, 0.0);
     for k in 0..ring.points.len() {
         let (a, b) = segment(ring, k);
-        let (d, along) = match ring.arcs[k] {
+        let (d, along) = match arc(ring.arcs[k]) {
             None => {
                 let v = sub(b, a);
                 let t = (dot(sub(p, a), v) / dot(v, v)).clamp(0.0, 1.0);
@@ -339,6 +341,18 @@ pub(crate) fn cut(
                 });
             }
         }
+        if let Some(Curve::Cut(c)) = cell.arcs[k] {
+            // A mitered bend's end: nothing may cut across it.
+            let inside = c
+                .points(p, q, 32)
+                .iter()
+                .filter(|x| clip.contains(**x))
+                .count();
+            if inside > 0 && inside < 33 {
+                return unsupported("across a mitered bend's end");
+            }
+            continue;
+        }
         if cell.arcs[k].is_some() {
             // Arcs are outline (relief) segments, which cuts keep clear of.
             continue;
@@ -401,7 +415,7 @@ pub(crate) fn cut(
     let mut visited = vec![false; crossings.len()];
     let mut pieces = Vec::new();
     while let Some(start) = (0..crossings.len()).find(|&i| !visited[i] && !crossings[i].entering) {
-        let (mut pts_out, mut arcs_out): (Vec<P2>, Vec<Option<Arc>>) = (Vec::new(), Vec::new());
+        let (mut pts_out, mut arcs_out): (Vec<P2>, Vec<Option<Curve>>) = (Vec::new(), Vec::new());
         let mut cur = start;
         loop {
             visited[cur] = true;
@@ -553,7 +567,7 @@ fn touches(clip: &Clip, ring: &Ring) -> bool {
         if clip.contains(a) || clip.on_boundary(a) {
             return true;
         }
-        match ring.arcs[k] {
+        match arc(ring.arcs[k]) {
             None => !matches!(clip.crossings(a, b), Ok(ts) if ts.is_empty()),
             Some(arc) => {
                 let (r, a0, sweep) = (
@@ -645,12 +659,32 @@ fn cut_across(
 
 /// Whether p lies inside a closed boundary of lines and arcs: crossings of a
 /// ray in an odd direction (so it misses vertices and tangencies).
-pub(crate) fn inside(p: P2, pts: &[P2], arcs: &[Option<Arc>]) -> bool {
+pub(crate) fn inside(p: P2, pts: &[P2], arcs: &[Option<Curve>]) -> bool {
+    if arcs.iter().any(|c| matches!(c, Some(Curve::Cut(_)))) {
+        // A mitered bend's end as short lines (it never comes near a hole's
+        // centre or a cut-out's first point).
+        let (mut q, mut qa) = (Vec::new(), Vec::new());
+        for k in 0..pts.len() {
+            let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+            match arcs[k] {
+                Some(Curve::Cut(c)) => {
+                    let line = c.points(a, b, 64);
+                    qa.extend(std::iter::repeat_n(None, line.len() - 1));
+                    q.extend(&line[..line.len() - 1]);
+                }
+                other => {
+                    q.push(a);
+                    qa.push(other);
+                }
+            }
+        }
+        return inside(p, &q, &qa);
+    }
     let d = [1.0, 0.371_293_417];
     let mut count = 0;
     for k in 0..pts.len() {
         let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
-        match arcs[k] {
+        match arc(arcs[k]) {
             None => {
                 // p + s d = a + t (b - a), s > 0, 0 <= t < 1.
                 let e = sub(b, a);
@@ -731,4 +765,9 @@ fn cross(a: P2, b: P2) -> f64 {
 }
 fn dist(a: P2, b: P2) -> f64 {
     dot(sub(a, b), sub(a, b)).sqrt()
+}
+
+/// The arc of a segment that is one (a mitered bend's end is not).
+fn arc(c: Option<Curve>) -> Option<Arc> {
+    c.and_then(Curve::arc)
 }

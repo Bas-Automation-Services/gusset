@@ -228,6 +228,15 @@
       "description": "A profile run along a base edge (a contour flange):\nevery corner of the profile becomes a bend of the part's radius.",
       "type": "object",
       "properties": {
+        "along": {
+          "description": "Further base edges the same contour runs along, each next to the one\nbefore, mitered at the corners between them. Full width only.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
         "bend_radius": {
           "description": "Inner bend radius for this feature's bends, in place of the part's.",
           "type": [

@@ -19,7 +19,8 @@ meshed. What it doesn't build yet it refuses with a clear message; it never appr
   meeting by build order.
 - **Hems:** single, double, teardrop, rolled, full or partial width.
 - **Contour flanges** of lines and tangent arcs on a base edge or a flange's tip, full or
-  partial width.
+  partial width, or along several edges in one go, mitered at each corner (every leg and
+  bend cut exactly, with corner reliefs).
 - **Folds** along a line across the plate, nested, at any angle to the outline; **jogs**
   (Z-steps by an offset).
 - **Holes and cut-outs** anywhere in the flat, across bends, and across the outline as

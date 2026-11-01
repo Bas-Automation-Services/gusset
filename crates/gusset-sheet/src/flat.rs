@@ -16,7 +16,7 @@ pub struct FlatPattern {
     /// Counter-clockwise outer boundary, base frame (z = 0 face seen from +z).
     pub outline: Vec<P2>,
     /// Per outline segment (`outline[k]` to `outline[k + 1]`): an arc, or a line.
-    pub outline_arcs: Vec<Option<Arc>>,
+    pub outline_arcs: Vec<Option<Curve>>,
     pub holes: Vec<Hole>,
     /// Cut-outs, counter-clockwise.
     pub cutouts: Vec<Ring>,
@@ -28,7 +28,7 @@ pub struct FlatPattern {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ring {
     pub points: Vec<P2>,
-    pub arcs: Vec<Option<Arc>>,
+    pub arcs: Vec<Option<Curve>>,
 }
 
 impl Ring {
@@ -48,10 +48,10 @@ impl Ring {
                 let left = [-d[1] / chord, d[0] / chord];
                 let mid = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
                 let h = chord / 2.0 / (sweep / 2.0).tan();
-                Some(Arc {
+                Some(Curve::Arc(Arc {
                     center: add(mid, scale(left, h)),
                     ccw: b > 0.0,
-                })
+                }))
             })
             .collect();
         Ring {
@@ -67,9 +67,13 @@ impl Ring {
         // Segment k of the reversed ring is segment (n - 1 - k) of this one.
         let arcs = (0..n)
             .map(|k| {
-                self.arcs[n - 1 - k].map(|a| Arc {
-                    center: a.center,
-                    ccw: !a.ccw,
+                self.arcs[n - 1 - k].map(|c| match c {
+                    Curve::Arc(a) => Curve::Arc(Arc {
+                        center: a.center,
+                        ccw: !a.ccw,
+                    }),
+                    // The same curve; its ends swap with the ring's points.
+                    Curve::Cut(_) => c,
                 })
             })
             .collect();
@@ -103,12 +107,69 @@ impl Arc {
     }
 }
 
+/// A boundary segment that isn't straight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Curve {
+    Arc(Arc),
+    /// The end of a bend mitered at a corner.
+    Cut(Cut),
+}
+
+impl Curve {
+    /// The arc, if it is one.
+    pub fn arc(self) -> Option<Arc> {
+        match self {
+            Curve::Arc(a) => Some(a),
+            Curve::Cut(_) => None,
+        }
+    }
+}
+
+/// The end of a bend mitered at a corner, in the flat: the point at flat
+/// distance s along `n` (from the bend's edge through `origin`) lies at
+/// t = c0 + c1 cos(phi) + c2 sin(phi) along `u`, phi = (s - s0) / radius
+/// (the bend angle; `radius` its neutral radius).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cut {
+    pub origin: P2,
+    pub u: P2,
+    pub n: P2,
+    pub s0: f64,
+    pub radius: f64,
+    pub c: [f64; 3],
+}
+
+impl Cut {
+    /// Bend angle at flat s.
+    pub fn phi(&self, s: f64) -> f64 {
+        (s - self.s0) / self.radius
+    }
+    pub fn t(&self, s: f64) -> f64 {
+        let (sin, cos) = self.phi(s).sin_cos();
+        self.c[0] + self.c[1] * cos + self.c[2] * sin
+    }
+    pub fn point(&self, s: f64) -> P2 {
+        add(self.origin, add(scale(self.u, self.t(s)), scale(self.n, s)))
+    }
+    /// Flat s of a point on it.
+    pub fn s_of(&self, p: P2) -> f64 {
+        dot(sub(p, self.origin), self.n)
+    }
+    /// Points from `from` to `to` (both on it), `pieces` + 1 of them.
+    pub fn points(&self, from: P2, to: P2, pieces: usize) -> Vec<P2> {
+        let (a, b) = (self.s_of(from), self.s_of(to));
+        (0..=pieces)
+            .map(|j| self.point(a + (b - a) * j as f64 / pieces as f64))
+            .collect()
+    }
+}
+
 /// Boundary points with an optional arc per segment; `arcs[k]` is the segment
 /// starting at `pts[k]`.
 #[derive(Clone, Debug, Default)]
 struct Path {
     pts: Vec<P2>,
-    arcs: Vec<Option<Arc>>,
+    arcs: Vec<Option<Curve>>,
 }
 
 impl Path {
@@ -128,10 +189,15 @@ impl Path {
     fn arc(&mut self, p: P2, center: P2, via: P2) {
         let from = *self.pts.last().unwrap();
         let (a, b) = (sub(from, center), sub(via, center));
-        *self.arcs.last_mut().unwrap() = Some(Arc {
+        *self.arcs.last_mut().unwrap() = Some(Curve::Arc(Arc {
             center,
             ccw: a[0] * b[1] - a[1] * b[0] > 0.0,
-        });
+        }));
+        self.line(p);
+    }
+    /// A curve (a mitered bend's end) from the last point to `p`.
+    fn curve(&mut self, p: P2, c: Curve) {
+        *self.arcs.last_mut().unwrap() = Some(c);
         self.line(p);
     }
     fn close(&mut self) {
@@ -148,13 +214,33 @@ impl Path {
 }
 
 /// Exact signed area of a closed boundary with arc segments (Green's theorem).
-pub fn path_area(pts: &[P2], arcs: &[Option<Arc>]) -> f64 {
+pub fn path_area(pts: &[P2], arcs: &[Option<Curve>]) -> f64 {
     (0..pts.len())
         .map(|k| {
             let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
             match arcs.get(k).copied().flatten() {
                 None => (p[0] * q[1] - q[0] * p[1]) / 2.0,
-                Some(arc) => {
+                Some(Curve::Cut(c)) => {
+                    // (x y' - y x') / 2 over s: smooth, so Gauss-Legendre in
+                    // a few pieces is exact to rounding.
+                    let (a, b) = (c.s_of(p), c.s_of(q));
+                    let pieces = 8;
+                    let mut sum = 0.0;
+                    for j in 0..pieces {
+                        let (s0, s1) = (
+                            a + (b - a) * j as f64 / pieces as f64,
+                            a + (b - a) * (j + 1) as f64 / pieces as f64,
+                        );
+                        for (x, w) in crate::fold::GAUSS {
+                            let s = s0 + (s1 - s0) * x;
+                            let (pt, h) = (c.point(s), 1e-6);
+                            let d = scale(sub(c.point(s + h), c.point(s - h)), 0.5 / h);
+                            sum += w * (s1 - s0) * (pt[0] * d[1] - pt[1] * d[0]) / 2.0;
+                        }
+                    }
+                    sum
+                }
+                Some(Curve::Arc(arc)) => {
                     let c = arc.center;
                     let r = dot(sub(p, c), sub(p, c)).sqrt();
                     let a0 = (p[1] - c[1]).atan2(p[0] - c[0]);
@@ -236,7 +322,20 @@ enum End {
         /// point when it meets the end line itself). The bends split along q
         /// to the centre; the relief cuts the rest.
         turn: (P2, P2, P2),
+        /// One contour along both edges: every strip past the first bend ends
+        /// on the miter too.
+        miter: Option<Miter>,
     },
+}
+
+/// A mitered corner of a contour along several edges: each strip ends where
+/// the first of its faces lies `half_gap` from the corner's symmetry plane
+/// (through `vertex`, unit normal `plane` toward this edge).
+#[derive(Clone, Copy, Debug)]
+struct Miter {
+    vertex: P2,
+    plane: P2,
+    half_gap: f64,
 }
 
 /// Where a bend at a corner with a small round or square relief runs past q
@@ -252,6 +351,60 @@ enum RunOn {
 }
 
 const EPS: f64 = 1e-9;
+/// Lines along a mitered bend's curved end in the cells, until the 3D build
+/// has a surface for it.
+const MITER_SAMPLES: usize = 96;
+
+/// A boundary for formats without the mitered bend end's curve: those ends
+/// as fine lines, arcs kept.
+pub fn lines_and_arcs(pts: &[P2], curves: &[Option<Curve>]) -> (Vec<P2>, Vec<Option<Arc>>) {
+    let (mut p, mut c) = (pts.to_vec(), curves.to_vec());
+    lines_for_cuts(&mut p, &mut c);
+    (p, c.into_iter().map(|c| c.and_then(Curve::arc)).collect())
+}
+
+/// A boundary's mitered bend ends as fine lines.
+fn lines_for_cuts(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Curve>>) {
+    if !arcs.iter().any(|c| matches!(c, Some(Curve::Cut(_)))) {
+        return;
+    }
+    let n = pts.len();
+    let (mut p2, mut a2) = (Vec::new(), Vec::new());
+    for k in 0..n {
+        let (p, q) = (pts[k], pts[(k + 1) % n]);
+        match arcs[k] {
+            Some(Curve::Cut(c)) => {
+                let line = c.points(p, q, MITER_SAMPLES);
+                p2.extend(&line[..line.len() - 1]);
+                a2.extend(std::iter::repeat_n(None, line.len() - 1));
+            }
+            other => {
+                p2.push(p);
+                a2.push(other);
+            }
+        }
+    }
+    *pts = p2;
+    *arcs = a2;
+}
+
+/// x in rows of [a, b, c, d] with a x0 + b x1 + c x2 = d (Cramer).
+fn solve3(r: [[f64; 4]; 3]) -> [f64; 3] {
+    let det = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let a = r.map(|row| [row[0], row[1], row[2]]);
+    let d = det(a);
+    std::array::from_fn(|j| {
+        let mut m = a;
+        for (i, row) in m.iter_mut().enumerate() {
+            row[j] = r[i][3];
+        }
+        det(m) / d
+    })
+}
 /// Width and depth of a tear relief's notch in 3D (fixed, whatever the
 /// thickness or the relief settings).
 const TEAR: f64 = 0.01;
@@ -274,7 +427,7 @@ pub struct Cell {
     /// vertex.
     pub polygon: Vec<P2>,
     /// Per segment: an arc (relief ends, holes crossing the cell), or a line.
-    pub arcs: Vec<Option<Arc>>,
+    pub arcs: Vec<Option<Curve>>,
     /// Holes that lie wholly inside the cell.
     pub holes: Vec<Hole>,
     /// Cut-outs that lie wholly inside the cell, clockwise.
@@ -341,7 +494,10 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         outline: base.clone(),
         bulges: spec.base.bulges.clone(),
     })
-    .arcs;
+    .arcs
+    .into_iter()
+    .map(|c| c.and_then(Curve::arc))
+    .collect::<Vec<Option<Arc>>>();
 
     let mut strips: Vec<Option<Strip>> = vec![None; n];
     // Per placed flange: id, base edge, its flat end, bends toward +z.
@@ -669,18 +825,31 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             // One flange feature with two edges: same settings.
             // A hem has no spec flange, so it never has the same settings.
             let spec_of = |k: usize| spec.flanges.iter().find(|f| f.id == folds[k].flange);
-            let same = match (spec_of(k), spec_of(m)) {
-                (Some(a), Some(b)) => {
-                    a.angle == b.angle
-                        && a.bend_radius == b.bend_radius
-                        && a.k_factor == b.k_factor
-                        && a.length == b.length
-                        && a.datum == b.datum
-                        && a.position == b.position
-                        && a.side == b.side
-                }
-                _ => false,
+            // Copies of one contour along several edges (`id`, `id@e`).
+            let feature = |k: usize| {
+                let id = &folds[k].flange;
+                let copies = id.contains('@')
+                    || spec
+                        .contours
+                        .iter()
+                        .any(|c| c.id.starts_with(&format!("{id}@")));
+                copies.then(|| id.split('@').next().unwrap().to_string())
             };
+            let one_contour =
+                contour(k) && contour(m) && feature(k).is_some() && feature(k) == feature(m);
+            let same = one_contour
+                || match (spec_of(k), spec_of(m)) {
+                    (Some(a), Some(b)) => {
+                        a.angle == b.angle
+                            && a.bend_radius == b.bend_radius
+                            && a.k_factor == b.k_factor
+                            && a.length == b.length
+                            && a.datum == b.datum
+                            && a.position == b.position
+                            && a.side == b.side
+                    }
+                    _ => false,
+                };
             // A lip on one of the two flanges continues its flange's corner
             // edge; lips on
             // both would meet too, and don't unfold.
@@ -731,6 +900,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     shape: CornerShape::TrimToBend,
                     run_on: RunOn::No,
                     turn: (q, q, q),
+                    miter: None,
                 };
                 continue;
             }
@@ -966,6 +1136,11 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 shape,
                 run_on,
                 turn,
+                miter: feature(k).filter(|_| contour(k)).map(|_| Miter {
+                    vertex,
+                    plane,
+                    half_gap,
+                }),
             };
         }
     }
@@ -1038,11 +1213,119 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         let f = &folds[root[i].unwrap()];
         f.s0 + f.bend_allowance
     };
-    // Where the flange ends along the edge at flat s (past its bend).
-    let flange_at = |i: usize, side: usize, t: f64, s: f64| match sides[i][side] {
-        End::Corner { flange, slope, .. } => flange + slope * (s - bend_end(i)),
-        _ => t,
+    // The fold maps alone (no cells yet), for where a mitered chain ends.
+    let shape = Layout {
+        flat: FlatPattern {
+            outline: Vec::new(),
+            outline_arcs: Vec::new(),
+            holes: Vec::new(),
+            cutouts: Vec::new(),
+            bends: Vec::new(),
+        },
+        cells: Vec::new(),
+        folds: folds.clone(),
     };
+    let maps = crate::fold::Model::new(spec, &shape);
+    // A mitered chain's end along edge i at flat s, past its first bend:
+    // where the miter's face of the strip there lies half the gap from the
+    // symmetry plane. Every fold turns about an axis along the edge, so
+    // moving along the edge moves the point along it: linear in t.
+    let mitered = |i: usize, side: usize, s: f64| -> Option<f64> {
+        let End::Corner { miter: Some(m), .. } = sides[i][side] else {
+            return None;
+        };
+        // The first bend keeps its own corner (trim, relief, weld, tear).
+        if s < bend_end(i) - EPS {
+            return None;
+        }
+        let k = (0..folds.len())
+            .rev()
+            .find(|&k| fold_ends[k].0 == i && folds[k].s0 <= s + EPS)?;
+        let f = &folds[k];
+        let zone = if s < f.s0 + f.bend_allowance - EPS {
+            Zone::Bend(k)
+        } else {
+            Zone::Flange(k)
+        };
+        // Whichever face reaches it first: the shorter strip.
+        let t = |z: f64| {
+            let p = maps.map(zone, at(i, 0.0, s), z);
+            (m.half_gap - dot(sub([p[0], p[1]], m.vertex), m.plane)) / dot(edge(i).1, m.plane)
+        };
+        let (a, b) = (t(0.0), t(spec.thickness));
+        Some(if side == 0 { a.max(b) } else { a.min(b) })
+    };
+    // Where the flange ends along the edge at flat s (past its bend).
+    let flange_at = |i: usize, side: usize, t: f64, s: f64| {
+        if let Some(t) = mitered(i, side, s) {
+            return t;
+        }
+        match sides[i][side] {
+            End::Corner { flange, slope, .. } => flange + slope * (s - bend_end(i)),
+            _ => t,
+        }
+    };
+    // A bend past the first in a mitered chain: its end, one curve from the
+    // bend's start to its end (on the face the miter takes mid-bend).
+    let mitered_cut = |i: usize, side: usize, k: usize| -> Option<(P2, P2, Cut)> {
+        let End::Corner { miter: Some(m), .. } = sides[i][side] else {
+            return None;
+        };
+        let f = &folds[k];
+        let (origin, u, normal, _) = edge(i);
+        let radius = f.radius + f.k_factor * spec.thickness;
+        let face = |z: f64, s: f64| {
+            let p = maps.map(Zone::Bend(k), at(i, 0.0, s), z);
+            (m.half_gap - dot(sub([p[0], p[1]], m.vertex), m.plane)) / dot(u, m.plane)
+        };
+        let mid = f.s0 + f.bend_allowance / 2.0;
+        let z = if (face(0.0, mid) - mitered(i, side, mid)?).abs() < 1e-9 {
+            0.0
+        } else {
+            spec.thickness
+        };
+        let ss = [f.s0, mid, f.s0 + f.bend_allowance];
+        let rows = ss.map(|s| {
+            let (sin, cos) = ((s - f.s0) / radius).sin_cos();
+            [1.0, cos, sin, face(z, s)]
+        });
+        let cut = Cut {
+            origin,
+            u,
+            n: normal,
+            s0: f.s0,
+            radius,
+            c: solve3(rows),
+        };
+        Some((cut.point(ss[0]), cut.point(ss[2]), cut))
+    };
+    // The later folds of edge i's chain, outward.
+    let later = |i: usize| -> Vec<usize> {
+        (0..folds.len())
+            .filter(|&k| fold_ends[k].0 == i && folds[k].parent.is_some())
+            .collect()
+    };
+    // One face takes the miter through each bend (where they'd swap mid-bend
+    // the end isn't one curve: not built).
+    for i in 0..n {
+        for side in 0..2 {
+            for k in later(i) {
+                let Some((_, _, cut)) = mitered_cut(i, side, k) else {
+                    continue;
+                };
+                let f = &folds[k];
+                for j in 1..8 {
+                    let s = f.s0 + f.bend_allowance * j as f64 / 8.0;
+                    if (cut.t(s) - mitered(i, side, s).unwrap()).abs() > 1e-7 {
+                        return Err(SheetError::Unsupported(format!(
+                            "{}: a mitered bend whose faces swap at the miter",
+                            f.flange
+                        )));
+                    }
+                }
+            }
+        }
+    }
     // A flange's free tip, (f0, end) to (f1, end), with its corners cut.
     let tip =
         |path: &mut Path, i: usize, f0: f64, f1: f64, end: f64, cut: Option<CornerCut>| match cut {
@@ -1074,7 +1357,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     ),
                 ] {
                     path.line(from);
-                    *path.arcs.last_mut().unwrap() = Some(Arc { center, ccw: true });
+                    *path.arcs.last_mut().unwrap() = Some(Curve::Arc(Arc { center, ccw: true }));
                     path.line(to);
                 }
             }
@@ -1242,7 +1525,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         if !corner_start {
             outline.line(base[i]);
             if strips[i].is_none() && base_arcs[i].is_some() {
-                *outline.arcs.last_mut().unwrap() = base_arcs[i];
+                *outline.arcs.last_mut().unwrap() = base_arcs[i].map(Curve::Arc);
             }
         }
         let Some(st) = strips[i] else { continue };
@@ -1289,6 +1572,12 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 }
             }
         }
+        for k in later(i) {
+            if let Some((p, q, cut)) = mitered_cut(i, 0, k) {
+                outline.line(p);
+                outline.curve(q, Curve::Cut(cut));
+            }
+        }
         tip(
             &mut outline,
             i,
@@ -1297,6 +1586,12 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             st.end,
             last_fold(i).and_then(tip_cut),
         );
+        for k in later(i).into_iter().rev() {
+            if let Some((p, q, cut)) = mitered_cut(i, 1, k) {
+                outline.line(q);
+                outline.curve(p, Curve::Cut(cut));
+            }
+        }
         match sides[i][1] {
             End::Free => {}
             End::Open { .. } => {
@@ -1315,7 +1610,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 }
                 outline.line(p);
                 if !crossed[(i + 1) % n] {
-                    *outline.arcs.last_mut().unwrap() = base_arcs[(i + 1) % n];
+                    *outline.arcs.last_mut().unwrap() = base_arcs[(i + 1) % n].map(Curve::Arc);
                 }
             }
             End::Corner {
@@ -1394,7 +1689,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             _ => base_cell.line(base[i]),
         }
         if strips[i].is_none() && base_arcs[i].is_some() && !crossed[i] {
-            *base_cell.arcs.last_mut().unwrap() = base_arcs[i];
+            *base_cell.arcs.last_mut().unwrap() = base_arcs[i].map(Curve::Arc);
         }
         let Some(st) = strips[i] else { continue };
         let [b0, b1] = span(i, &st).0;
@@ -1491,6 +1786,23 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         }
         bend.push(at(i, e1, fold_bend_end));
         bend.extend(start(1, b1));
+        let mut bend_arcs = vec![None; bend.len()];
+        // A later bend of a mitered chain: its ends are curves.
+        if fold.parent.is_some() {
+            let (a, c) = (mitered_cut(i, 0, k), mitered_cut(i, 1, k));
+            if a.is_some() || c.is_some() {
+                let (p0, q0, c0) = match a {
+                    Some((p, q, cut)) => (p, q, Some(Curve::Cut(cut))),
+                    None => (at(i, b0, fold.s0), at(i, e0, fold_bend_end), None),
+                };
+                let (p1, q1, c1) = match c {
+                    Some((p, q, cut)) => (p, q, Some(Curve::Cut(cut))),
+                    None => (at(i, b1, fold.s0), at(i, e1, fold_bend_end), None),
+                };
+                bend = vec![p0, q0, q1, p1];
+                bend_arcs = vec![c0, None, c1, None];
+            }
+        }
         // A bend run on past q keeps q, where the base ends, as a vertex.
         if run_on(1) {
             bend.push(at(i, q1, fold.s0));
@@ -1498,18 +1810,25 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         if run_on(0) {
             bend.push(at(i, q0, fold.s0));
         }
+        bend_arcs.resize(bend.len(), None);
         cells.push(Cell {
             name: format!("{}.bend", fold.flange),
-            arcs: vec![None; bend.len()],
+            arcs: bend_arcs,
             polygon: bend,
             holes: Vec::new(),
             inner: Vec::new(),
             zone: Zone::Bend(k),
         });
         let mut flange = Path::default();
-        flange.line(at(i, f0, fold_bend_end));
+        let first = fold.parent.is_none();
+        let from = |side: usize, t: f64| {
+            mitered(i, side, fold_bend_end)
+                .filter(|_| !first)
+                .unwrap_or(t)
+        };
+        flange.line(at(i, from(0, f0), fold_bend_end));
         tip(&mut flange, i, f0, f1, flange_end, tip_cut(k));
-        flange.line(at(i, f1, fold_bend_end));
+        flange.line(at(i, from(1, f1), fold_bend_end));
         for t in [e1, e0] {
             if (t - f0).abs() > EPS && (t - f1).abs() > EPS {
                 flange.line(at(i, t, fold_bend_end));
@@ -1570,11 +1889,15 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         let (l0, l1) = (
             if line_on(0) {
                 ends(0, f0)
+            } else if let Some(t) = mitered(i, 0, centre).filter(|_| fold.parent.is_some()) {
+                t
             } else {
                 mid(0, b0, e0)
             },
             if line_on(1) {
                 ends(1, f1)
+            } else if let Some(t) = mitered(i, 1, centre).filter(|_| fold.parent.is_some()) {
+                t
             } else {
                 mid(1, b1, e1)
             },
@@ -1609,10 +1932,10 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     layout.flat.holes = inside.clone();
     let notches = across.iter().map(|h| {
         let (c, r) = (h.center, h.diameter / 2.0);
-        let arc = Some(Arc {
+        let arc = Some(Curve::Arc(Arc {
             center: c,
             ccw: true,
-        });
+        }));
         // Two half circles, from an odd angle: a hole centred on an edge
         // would otherwise have its vertices on that edge.
         let (sin, cos) = 1f64.sin_cos();
@@ -1671,7 +1994,7 @@ fn cross2(a: P2, b: P2) -> f64 {
 /// Drops points in the middle of a straight run (e.g. a base corner that a
 /// full-width flange strip continues past) or of one circle's arc (a round
 /// notch's two halves).
-fn simplify(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Arc>>, lines: bool) {
+fn simplify(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Curve>>, lines: bool) {
     loop {
         let len = pts.len();
         let drop = (0..len).find(|&k| {
@@ -1684,7 +2007,9 @@ fn simplify(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Arc>>, lines: bool) {
                 && (d1[0] * d2[1] - d1[1] * d2[0]).abs() < EPS
                 && dot(d1, d2) > 0.0;
             let one_circle = match (arcs[prev], arcs[k]) {
-                (Some(a), Some(b)) => dist(a.center, b.center) < EPS && a.ccw == b.ccw,
+                (Some(Curve::Arc(a)), Some(Curve::Arc(b))) => {
+                    dist(a.center, b.center) < EPS && a.ccw == b.ccw
+                }
                 _ => false,
             };
             straight || one_circle
@@ -1906,7 +2231,12 @@ mod tests {
         // the bend start (y 58): centres at y 58 for depth 1, y 56 for depth 3.
         for (depth, cy) in [(1.0, 58.0), (3.0, 56.0)] {
             let flat = flat_pattern(&round_relief(depth)).unwrap();
-            let arcs: Vec<_> = flat.outline_arcs.iter().flatten().collect();
+            let arcs: Vec<_> = flat
+                .outline_arcs
+                .iter()
+                .flatten()
+                .filter_map(|c| c.arc())
+                .collect();
             assert_eq!(arcs.len(), 2);
             for (cx, p) in [(71.0, [72.0, cy]), (19.0, [20.0, cy])] {
                 assert!(arcs

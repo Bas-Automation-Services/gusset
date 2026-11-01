@@ -4,7 +4,7 @@
 //! deeper than `TOUCH` clash; the overlap is mapped back to the flat, on both
 //! features, so it can be shown where the part runs into itself.
 
-use crate::flat::{Arc, Cell, Zone, P2};
+use crate::flat::{Cell, Curve, Zone, P2};
 use crate::fold::{Model, P3};
 use crate::spec::PartSpec;
 use crate::SheetError;
@@ -546,13 +546,18 @@ fn centroid(areas: &[Vec<P2>]) -> P2 {
 }
 
 /// A closed boundary as points, arcs in chords within `CHORD`.
-fn polyline(points: &[P2], arcs: &[Option<Arc>]) -> Vec<P2> {
+fn polyline(points: &[P2], arcs: &[Option<Curve>]) -> Vec<P2> {
     let n = points.len();
     let mut out = Vec::new();
     for k in 0..n {
         let (p, q) = (points[k], points[(k + 1) % n]);
         out.push(p);
-        if let Some(a) = arcs.get(k).copied().flatten() {
+        if let Some(Curve::Cut(c)) = arcs.get(k).copied().flatten() {
+            let line = c.points(p, q, 64);
+            out.extend(&line[1..line.len() - 1]);
+            continue;
+        }
+        if let Some(a) = arcs.get(k).copied().flatten().and_then(Curve::arc) {
             let u = [p[0] - a.center[0], p[1] - a.center[1]];
             let r = (u[0] * u[0] + u[1] * u[1]).sqrt();
             let sweep = a.sweep(p, q);

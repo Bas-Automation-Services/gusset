@@ -3,13 +3,13 @@
 //! strip and what turns. Flanges and hems on edges wholly on the turning side
 //! turn with the fold; a fold line may not run through them.
 
-use crate::flat::{Arc, Cell, FlatBend, Fold, Layout, Zone, P2};
+use crate::flat::{Arc, Cell, Curve, FlatBend, Fold, Layout, Zone, P2};
 use crate::spec::{BendLocation, PartSpec, Side};
 use crate::SheetError;
 
 const EPS: f64 = 1e-9;
 
-type Piece = (Vec<P2>, Vec<Option<Arc>>);
+type Piece = (Vec<P2>, Vec<Option<Curve>>);
 
 /// Adds the spec's folds to a layout of the base with its flanges and hems
 /// (before holes are cut).
@@ -237,7 +237,7 @@ fn extent(c: &Cell, f: impl Fn(P2) -> f64) -> (f64, f64) {
         let (p, q) = (c.polygon[k], c.polygon[(k + 1) % n]);
         values.push(f(p));
         if let Some(arc) = c.arcs[k] {
-            for x in arc_points(p, q, arc, 16) {
+            for x in curve_points(p, q, arc, 16) {
                 values.push(f(x));
             }
         }
@@ -265,7 +265,7 @@ fn arc_points(p: P2, q: P2, arc: Arc, n: usize) -> Vec<P2> {
 /// segments, through no vertex.
 fn split(
     pts: &[P2],
-    arcs: &[Option<Arc>],
+    arcs: &[Option<Curve>],
     f: &Fold,
     c: f64,
 ) -> Result<(Vec<Piece>, Vec<Piece>), SheetError> {
@@ -286,7 +286,7 @@ fn split(
             return unsupported("its line runs through a corner of the part");
         }
         if let Some(arc) = arcs[k] {
-            if arc_points(p, q, arc, 32)
+            if curve_points(p, q, arc, 32)
                 .into_iter()
                 .any(|x| (s(x) > 0.0) != (sp > 0.0) || (s(x) > 0.0) != (sq > 0.0))
             {
@@ -554,6 +554,17 @@ mod tests {
             let m = crate::fold::exact_mass(&spec).unwrap();
             assert!((m.volume - volume).abs() < 1e-3, "{side}: {}", m.volume);
             fold(&spec).unwrap();
+        }
+    }
+}
+
+/// Points strictly inside a curved segment.
+fn curve_points(p: P2, q: P2, curve: Curve, pieces: usize) -> Vec<P2> {
+    match curve {
+        Curve::Arc(arc) => arc_points(p, q, arc, pieces),
+        Curve::Cut(c) => {
+            let line = c.points(p, q, pieces);
+            line[1..line.len() - 1].to_vec()
         }
     }
 }

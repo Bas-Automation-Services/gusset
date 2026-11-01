@@ -164,7 +164,17 @@ MIT/Apache; we can fix that along the way in a PR.
      centroid) and one ray; a ray grazing a hole's edge on a folded sheet miscounted and
      rejected sound parts (exact and mesh volumes agreed to 6e-6). A face is now reported
      only when its second largest triangle's centroid agrees.
-10. Anything else we run into while building.
+10. **Conoid surfaces: done** (branch `feat/conoid`, merged into `integration/3.0` as
+    `208a416`; not opened upstream yet).
+   - `SurfaceGeometry::Conoid { frame, c }`: S(u, v) = O + v (cos u x + sin u y) +
+     (c0 + c1 cos u + c2 sin u) z, UV = (angle, radius): radial rulings over a cylinder axis.
+     A bend mitered at a corner ends on one, cut square to the sheet.
+   - `conoid_ellipse(frame, c, radius)`: its edge at a radius as an exact ellipse (parameter
+     = angle - phase). `projected_boundary(...)`: a projected pcurve for any edge on a face
+     (here the ellipse on the bend's cylinder).
+   - Projection, tessellation (grid sized for the twist), classification, placement;
+     STEP as a bicubic B-spline fit like Wrapped; booleans, SSI and IFC refuse it.
+11. Anything else we run into while building.
 
 ## Known kernel issues (2026-10-29)
 

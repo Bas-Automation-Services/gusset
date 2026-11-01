@@ -3,7 +3,7 @@
 //! (down). Millimetres; y is flipped so the base frame's +y points up.
 //! Classes for styling: `cut`, `hole`, `bend up` / `bend down`, `clash`.
 
-use gusset_sheet::flat::{Arc, FlatPattern};
+use gusset_sheet::flat::{lines_and_arcs, Arc, FlatPattern};
 use std::fmt::Write;
 
 pub fn flat_svg(flat: &FlatPattern) -> String {
@@ -13,11 +13,12 @@ pub fn flat_svg(flat: &FlatPattern) -> String {
 /// With areas marked in red under the bend lines: where a part folds into
 /// itself (`gusset_sheet::clash`).
 pub fn flat_svg_marked(flat: &FlatPattern, marks: &[Vec<[f64; 2]>]) -> String {
-    let mut pts: Vec<[f64; 2]> = flat.outline.clone();
+    let (outline, outline_arcs) = lines_and_arcs(&flat.outline, &flat.outline_arcs);
+    let mut pts: Vec<[f64; 2]> = outline.clone();
     // Arcs can bulge past their end points: take their full circles' boxes.
-    for (k, arc) in flat.outline_arcs.iter().enumerate() {
+    for (k, arc) in outline_arcs.iter().enumerate() {
         if let Some(a) = arc {
-            let r = dist(flat.outline[k], a.center);
+            let r = dist(outline[k], a.center);
             pts.push([a.center[0] - r, a.center[1] - r]);
             pts.push([a.center[0] + r, a.center[1] + r]);
         }
@@ -40,9 +41,10 @@ pub fn flat_svg_marked(flat: &FlatPattern, marks: &[Vec<[f64; 2]>]) -> String {
         num(hi[1] - lo[1] + 2.0 * margin)
     )
     .unwrap();
-    let mut d = ring(&flat.outline, &flat.outline_arcs);
+    let mut d = ring(&outline, &outline_arcs);
     for c in &flat.cutouts {
-        d += &ring(&c.points, &c.arcs);
+        let (points, arcs) = lines_and_arcs(&c.points, &c.arcs);
+        d += &ring(&points, &arcs);
     }
     writeln!(
         out,

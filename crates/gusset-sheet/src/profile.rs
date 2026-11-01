@@ -58,9 +58,62 @@ impl PartSpec {
     }
 
     /// This spec, with a profile base replaced by its base plate and contours.
+    /// A contour along several edges as one contour per edge, `id` on the
+    /// first and `id@e` on edge e: one feature, mitered where they meet.
+    fn without_along(&self) -> Result<PartSpec, SheetError> {
+        let n = self.base.outline.len();
+        let mut part = self.clone();
+        let mut contours = Vec::new();
+        for c in &self.contours {
+            if c.id.contains('@') {
+                return Err(SheetError::Invalid(format!(
+                    "contour {}: '@' is reserved in ids",
+                    c.id
+                )));
+            }
+            if c.along.is_empty() {
+                contours.push(c.clone());
+                continue;
+            }
+            let unsupported =
+                |what: &str| Err(SheetError::Unsupported(format!("contour {}: {what}", c.id)));
+            let EdgeRef::Base(first) = c.on else {
+                return unsupported("along several edges from a flange's tip");
+            };
+            if c.width.is_some() {
+                return unsupported("a partial width along several edges");
+            }
+            let mut previous = first;
+            for &e in &c.along {
+                if n == 0 || e != (previous + 1) % n || e == first {
+                    return Err(SheetError::Invalid(format!(
+                        "contour {}: `along` must name the following base edges in turn",
+                        c.id
+                    )));
+                }
+                previous = e;
+            }
+            let mut head = c.clone();
+            head.along = Vec::new();
+            contours.push(head.clone());
+            for &e in &c.along {
+                contours.push(Contour {
+                    id: format!("{}@{e}", c.id),
+                    on: EdgeRef::Base(e),
+                    ..head.clone()
+                });
+            }
+        }
+        part.contours = contours;
+        Ok(part)
+    }
+
     pub fn resolved(&self) -> Result<Cow<'_, PartSpec>, SheetError> {
         if !self.jogs.is_empty() {
             return Ok(Cow::Owned(self.without_jogs()?.resolved()?.into_owned()));
+        }
+        if self.contours.iter().any(|c| !c.along.is_empty()) {
+            return Ok(Cow::Owned(self.without_along()?.resolved()?.into_owned()));
         }
         let Some(p) = &self.base.profile else {
             return Ok(Cow::Borrowed(self));
@@ -113,6 +166,7 @@ impl PartSpec {
                 face,
                 bend_radius: None,
                 k_factor: None,
+                along: Vec::new(),
             }
         };
         let mut contours = Vec::new();

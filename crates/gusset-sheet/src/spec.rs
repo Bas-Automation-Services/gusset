@@ -170,6 +170,10 @@ pub struct Contour {
     /// K-factor for this feature's bends, in place of the part's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub k_factor: Option<f64>,
+    /// Further base edges the same contour runs along, each next to the one
+    /// before, mitered at the corners between them. Full width only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub along: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

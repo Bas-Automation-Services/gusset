@@ -2,7 +2,7 @@
 //! lines, on the layers sheet metal flat patterns commonly use
 //! (Outer, Inner, BendUp, BendDown). Millimetres, base frame.
 
-use gusset_sheet::flat::FlatPattern;
+use gusset_sheet::flat::{lines_and_arcs, FlatPattern};
 use std::fmt::Write;
 
 pub fn flat_dxf(flat: &FlatPattern) -> String {
@@ -16,9 +16,11 @@ pub fn flat_dxf(flat: &FlatPattern) -> String {
     pair(0, "SECTION");
     pair(2, "ENTITIES");
 
-    ring(&mut pair, "Outer", &flat.outline, &flat.outline_arcs);
+    let (outline, arcs) = lines_and_arcs(&flat.outline, &flat.outline_arcs);
+    ring(&mut pair, "Outer", &outline, &arcs);
     for cutout in &flat.cutouts {
-        ring(&mut pair, "Inner", &cutout.points, &cutout.arcs);
+        let (points, arcs) = lines_and_arcs(&cutout.points, &cutout.arcs);
+        ring(&mut pair, "Inner", &points, &arcs);
     }
     for hole in &flat.holes {
         pair(0, "CIRCLE");

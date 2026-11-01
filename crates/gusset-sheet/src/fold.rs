@@ -5,12 +5,13 @@
 //!
 //! Flat frame: base cell in XY, sheet from z = 0 to z = T.
 
-use crate::flat::{layout, Arc, Fold, Layout, Zone, P2};
+use crate::flat::{layout, Curve, Cut, Fold, Layout, Zone, P2};
 use crate::spec::PartSpec;
 use crate::SheetError;
 use opengeometry::brep::{
-    boundary, plane_boundary, uv_line, Accuracy, BrepEnvelope, Builder, CurveGeometry, Frame3,
-    GeometryError, Orientation, PcurveGeometry, SurfaceGeometry, Use, Wrap,
+    boundary, conoid_ellipse, plane_boundary, projected_boundary, uv_line, Accuracy, BrepEnvelope,
+    Builder, CurveGeometry, Frame3, GeometryError, Orientation, PcurveGeometry, SurfaceGeometry,
+    Use, Wrap,
 };
 use opengeometry::math::Interval;
 use opengeometry::tessellation::tessellate;
@@ -427,9 +428,9 @@ impl<'a> Model<'a> {
         let key = |p: P2| ((p[0] * 1e6).round() as i64, (p[1] * 1e6).round() as i64);
         let mut ids: HashMap<(i64, i64), usize> = HashMap::new();
         let mut points: Vec<(P2, Zone)> = Vec::new();
-        let mut loops: Vec<(Vec<usize>, Vec<Option<Arc>>)> = Vec::new();
+        let mut loops: Vec<(Vec<usize>, Vec<Option<Curve>>)> = Vec::new();
         // Cut-outs a cell holds whole: (cell, its loop), clockwise.
-        let mut inner: Vec<(usize, Vec<usize>, Vec<Option<Arc>>)> = Vec::new();
+        let mut inner: Vec<(usize, Vec<usize>, Vec<Option<Curve>>)> = Vec::new();
         let rings = cells.iter().enumerate().flat_map(|(c, cell)| {
             std::iter::once((c, &cell.polygon, &cell.arcs, false)).chain(
                 cell.inner
@@ -439,7 +440,7 @@ impl<'a> Model<'a> {
         });
         for (c, polygon, arcs, is_inner) in rings {
             let cell = &cells[c];
-            let (mut lp, mut la): (Vec<usize>, Vec<Option<Arc>>) = (Vec::new(), Vec::new());
+            let (mut lp, mut la): (Vec<usize>, Vec<Option<Curve>>) = (Vec::new(), Vec::new());
             for (k, &p) in polygon.iter().enumerate() {
                 let id = *ids.entry(key(p)).or_insert_with(|| {
                     points.push((p, cell.zone));
@@ -465,8 +466,15 @@ impl<'a> Model<'a> {
         }
         // An undirected flat edge: its end points, and for an arc a point on
         // it (a hole crossing one line leaves two arcs between the same ends).
-        let ek = |p: usize, q: usize, arc: Option<Arc>| -> EdgeKey {
-            let mid = arc.map(|a| {
+        let ek = |p: usize, q: usize, arc: Option<Curve>| -> EdgeKey {
+            let mid = arc.map(|c| {
+                let a = match c {
+                    Curve::Arc(a) => a,
+                    Curve::Cut(cut) => {
+                        let (pp, qq) = (points[p].0, points[q].0);
+                        return key(cut.point((cut.s_of(pp) + cut.s_of(qq)) / 2.0));
+                    }
+                };
                 let (pp, qq) = (points[p].0, points[q].0);
                 let r = dot2(sub2(pp, a.center), sub2(pp, a.center)).sqrt();
                 let angle =
@@ -476,7 +484,7 @@ impl<'a> Model<'a> {
             (p.min(q), p.max(q), mid)
         };
         // Undirected edge -> (cells using it, owner cell, owner direction, arc).
-        type Use2 = (usize, usize, (usize, usize), Option<Arc>);
+        type Use2 = (usize, usize, (usize, usize), Option<Curve>);
         let mut uses: HashMap<EdgeKey, Use2> = HashMap::new();
         let all = loops
             .iter()
@@ -513,10 +521,52 @@ impl<'a> Model<'a> {
         let mut edges: HashMap<(EdgeKey, usize), Edge> = HashMap::new();
         // Walls along arcs: surface, parameter at the start vertex, sweep, start vertex.
         let mut arc_walls: HashMap<EdgeKey, (SurfaceGeometry, f64, f64, usize)> = HashMap::new();
+        // Walls along mitered bend ends: fold, conoid coefficients, angle
+        // range, the vertex at its start.
+        let mut cut_walls: HashMap<EdgeKey, (usize, [f64; 3], f64, f64, usize)> = HashMap::new();
         for (&k, &(_, owner, (p, q), arc)) in &uses {
             let (lo, hi) = (k.0, k.1);
             let zone = cells[owner].zone;
-            if let Some(arc) = arc {
+            if let Some(Curve::Cut(cut)) = arc {
+                // A mitered bend's end: the cut face is a conoid around the
+                // bend's axis (along = -sigma t(phi)); its edges on the
+                // bend's layers are ellipses.
+                let Zone::Bend(fi) = zone else {
+                    return Err(SheetError::Kernel("a mitered end outside a bend".into()));
+                };
+                let f = &self.folds[fi];
+                let frame = self.cylinder_frame(f);
+                let c3 = cut.c.map(|x| -f.sigma * x);
+                let phi = |v: usize| cut.phi(cut.s_of(points[v].0));
+                let (start, lo_phi, hi_phi) = if phi(p) <= phi(q) {
+                    (p, phi(p), phi(q))
+                } else {
+                    (q, phi(q), phi(p))
+                };
+                for level in 0..2 {
+                    let rho = self.radius(f, level as f64 * t);
+                    let (ellipse, phase) = conoid_ellipse(frame, c3, rho)?;
+                    let id = b.edge(
+                        ellipse,
+                        Interval::new(lo_phi - phase, hi_phi - phase).map_err(GeometryError::from)?,
+                        false,
+                    );
+                    edges.insert(
+                        (k, level),
+                        Edge {
+                            id,
+                            start: vertex[start][level],
+                            kind: Kind::Cut {
+                                phi: [lo_phi, hi_phi],
+                                phase,
+                            },
+                        },
+                    );
+                }
+                cut_walls.insert(k, (fi, c3, lo_phi, hi_phi, start));
+                continue;
+            }
+            if let Some(Curve::Arc(arc)) = arc {
                 // Counter-clockwise from s, in the zone's own frame.
                 let s = if arc.ccw { p } else { q };
                 let sweep = arc.sweep(points[p].0, points[q].0).abs();
@@ -638,7 +688,12 @@ impl<'a> Model<'a> {
                 .iter()
                 .zip(&loops[c].1)
                 .filter_map(|(&v, a)| {
-                    a.map(|a| dot2(sub2(points[v].0, a.center), sub2(points[v].0, a.center)).sqrt())
+                    a.map(|a| match a {
+                        Curve::Arc(a) => {
+                            dot2(sub2(points[v].0, a.center), sub2(points[v].0, a.center)).sqrt()
+                        }
+                        Curve::Cut(c) => c.c[1].abs() + c.c[2].abs(),
+                    })
                 })
                 .fold(0.0, f64::max);
             for level in 0..2 {
@@ -713,10 +768,92 @@ impl<'a> Model<'a> {
         outline.sort();
         for (owner, (p, q), k2) in outline {
             let zone = cells[owner].zone;
+            if let Some(&(fi, c3, lo_phi, hi_phi, start)) = cut_walls.get(&k2) {
+                let f = &self.folds[fi];
+                let frame = self.cylinder_frame(f);
+                let (r0, r1) = (self.radius(f, 0.0), self.radius(f, t));
+                let phi = |v: usize| if v == start { lo_phi } else { hi_phi };
+                let (bottom, top) = (edges[&(k2, 0)], edges[&(k2, 1)]);
+                let phase = |e: &Edge| match e.kind {
+                    Kind::Cut { phase, .. } => phase,
+                    _ => 0.0,
+                };
+                let along = |e: &Edge, from: u32| {
+                    if from == e.start {
+                        Orientation::Forward
+                    } else {
+                        Orientation::Reverse
+                    }
+                };
+                let rate = (r1 - r0) / t;
+                let wall = vec![
+                    boundary(
+                        bottom.id,
+                        vertex[p][0],
+                        vertex[q][0],
+                        along(&bottom, vertex[p][0]),
+                        uv_line([phase(&bottom), r0], [1.0, 0.0]),
+                    ),
+                    boundary(
+                        vertical[&q].id,
+                        vertex[q][0],
+                        vertex[q][1],
+                        Orientation::Forward,
+                        uv_line([phi(q), r0], [0.0, rate]),
+                    ),
+                    boundary(
+                        top.id,
+                        vertex[q][1],
+                        vertex[p][1],
+                        along(&top, vertex[q][1]),
+                        uv_line([phase(&top), r1], [1.0, 0.0]),
+                    ),
+                    boundary(
+                        vertical[&p].id,
+                        vertex[p][1],
+                        vertex[p][0],
+                        Orientation::Reverse,
+                        uv_line([phi(p), r0], [0.0, rate]),
+                    ),
+                ];
+                let face = b.face(
+                    &format!("side.{side}"),
+                    SurfaceGeometry::Conoid { frame, c: c3 },
+                    [[lo_phi, hi_phi], [r0.min(r1), r0.max(r1)]],
+                    wall,
+                )?;
+                // Its normal S_u x S_v at the middle against the way into the
+                // cell (left of p -> q in the flat).
+                let (um, vm) = ((lo_phi + hi_phi) / 2.0, (r0 + r1) / 2.0);
+                let (sn, cs) = um.sin_cos();
+                let su = add(
+                    add(scale(frame.x, -vm * sn), scale(frame.y, vm * cs)),
+                    scale(frame.z, -c3[1] * sn + c3[2] * cs),
+                );
+                let sv = add(scale(frame.x, cs), scale(frame.y, sn));
+                let normal = cross(su, sv);
+                let Some(Curve::Cut(cut)) = uses[&k2].3 else {
+                    unreachable!()
+                };
+                let s_mid = cut.s0 + um * cut.radius;
+                let m = cut.point(s_mid);
+                let d = sub2(points[q].0, points[p].0);
+                let left = unit2([-d[1], d[0]]).map(|x| x * 1e-4);
+                let z_mid = t / 2.0;
+                let inward = sub(
+                    self.map(zone, [m[0] + left[0], m[1] + left[1]], z_mid),
+                    self.map(zone, m, z_mid),
+                );
+                if dot(normal, inward) > 0.0 {
+                    b.set_face_sense(face, Orientation::Reverse)?;
+                }
+                side += 1;
+                continue;
+            }
             if let Some((wall, t0, sweep, start)) = arc_walls.get(&k2) {
                 // The cell lies left of p -> q: inside the circle when the arc
                 // runs counter-clockwise.
-                let ccw = uses[&k2].3.unwrap().ccw;
+                let ccw = uses[&k2].3.and_then(Curve::arc).unwrap().ccw;
                 let phi = |v: usize| if v == *start { *t0 } else { t0 + sweep };
                 let (bottom, top) = (edges[&(k2, 0)], edges[&(k2, 1)]);
                 let along = |e: &Edge, from: u32| {
@@ -1110,6 +1247,19 @@ impl<'a> Model<'a> {
         Ok(match surface {
             Surface::Plane(frame) => plane_boundary(b, *frame, e.id, from, to, sense)?,
             Surface::Cylinder { frame, .. } => {
+                if let Kind::Cut { phi, .. } = e.kind {
+                    let from_phi = if from == e.start { phi[0] } else { phi[1] };
+                    let local = frame.to_local(b.brep().topology.vertices[from as usize].position);
+                    return Ok(projected_boundary(
+                        b,
+                        &surface.geometry(),
+                        e.id,
+                        from,
+                        to,
+                        sense,
+                        Some([from_phi, local[2]]),
+                    )?);
+                }
                 let pcurve = match e.kind {
                     Kind::Arc { v } => uv_line([0.0, v], [1.0, 0.0]),
                     Kind::Helix { origin, direction } => uv_line(origin, direction),
@@ -1134,7 +1284,7 @@ impl<'a> Model<'a> {
                             [0.0, dot(direction, frame.z)],
                         )
                     }
-                    Kind::Circle => unreachable!(),
+                    Kind::Circle | Kind::Cut { .. } => unreachable!(),
                 };
                 boundary(e.id, from, to, sense, pcurve)
             }
@@ -1175,6 +1325,12 @@ enum Kind {
         origin: [f64; 2],
         a: [f64; 2],
         b: [f64; 2],
+    },
+    /// A mitered bend's end on one of its layers: an ellipse (parameter =
+    /// bend angle - phase), its pcurve on the bend face projected.
+    Cut {
+        phi: [f64; 2],
+        phase: f64,
     },
 }
 
@@ -1293,7 +1449,7 @@ pub fn exact_mass(spec: &PartSpec) -> Result<Mass, SheetError> {
 }
 
 /// 8-point Gauss-Legendre on [0, 1]: (node, weight).
-const GAUSS: [(f64, f64); 8] = {
+pub(crate) const GAUSS: [(f64, f64); 8] = {
     const X: [f64; 4] = [
         0.183_434_642_495_649_8,
         0.525_532_409_916_329,
@@ -1322,6 +1478,8 @@ const GAUSS: [(f64, f64); 8] = {
 enum Piece {
     Line(P2, P2),
     Arc(P2, f64, f64, f64),
+    /// A mitered bend's end from flat s to s.
+    Cut(Cut, f64, f64),
 }
 
 impl Piece {
@@ -1339,6 +1497,15 @@ impl Piece {
                     [-r * sweep * sn, r * sweep * cs],
                 )
             }
+            Piece::Cut(c, a, b) => {
+                let x = a + s * (b - a);
+                let (sn, cs) = c.phi(x).sin_cos();
+                let dt = (-c.c[1] * sn + c.c[2] * cs) / c.radius;
+                (
+                    c.point(x),
+                    [(c.u[0] * dt + c.n[0]) * (b - a), (c.u[1] * dt + c.n[1]) * (b - a)],
+                )
+            }
         }
     }
 
@@ -1348,6 +1515,7 @@ impl Piece {
         let (turn, along) = match *self {
             Piece::Line(p, q) => (0.0, dot2(sub2(q, p), x_dir).abs()),
             Piece::Arc(_, r, _, sweep) => (sweep.abs(), r * sweep.abs()),
+            Piece::Cut(c, a, b) => ((b - a).abs() / c.radius, (b - a).abs()),
         };
         let n = ((turn / (std::f64::consts::PI / 8.0))
             .max(along / x_step)
@@ -1361,6 +1529,7 @@ impl Piece {
                     Piece::Arc(c, r, a0, sweep) => {
                         Piece::Arc(c, r, a0 + s0 * sweep, sweep / n as f64)
                     }
+                    Piece::Cut(c, a, b) => Piece::Cut(c, a + s0 * (b - a), a + s1 * (b - a)),
                 }
             })
             .collect()
@@ -1373,7 +1542,7 @@ type PieceKey = ((i64, i64), (i64, i64), Option<(i64, i64)>);
 fn piece_key(piece: &Piece) -> PieceKey {
     let key = |p: P2| ((p[0] * 1e6).round() as i64, (p[1] * 1e6).round() as i64);
     let (p, q) = (key(piece.at(0.0).0), key(piece.at(1.0).0));
-    let mid = matches!(piece, Piece::Arc(..)).then(|| key(piece.at(0.5).0));
+    let mid = matches!(piece, Piece::Arc(..) | Piece::Cut(..)).then(|| key(piece.at(0.5).0));
     (p.min(q), p.max(q), mid)
 }
 
@@ -1393,11 +1562,12 @@ impl Model<'_> {
                     let (p, q) = (polygon[k], polygon[(k + 1) % n]);
                     let piece = match arcs[k] {
                         None => Piece::Line(p, q),
-                        Some(arc) => {
+                        Some(Curve::Arc(arc)) => {
                             let r = dot2(sub2(p, arc.center), sub2(p, arc.center)).sqrt();
                             let a0 = (p[1] - arc.center[1]).atan2(p[0] - arc.center[0]);
                             Piece::Arc(arc.center, r, a0, arc.sweep(p, q))
                         }
+                        Some(Curve::Cut(c)) => Piece::Cut(c, c.s_of(p), c.s_of(q)),
                     };
                     *count.entry(piece_key(&piece)).or_default() += 1;
                     pieces.push((c, piece, false));
@@ -1815,7 +1985,12 @@ mod corner_relief_tests {
         };
         let centre = |size: f64| {
             let flat = crate::flat::flat_pattern(&spec("round", size)).unwrap();
-            flat.outline_arcs.iter().flatten().next().unwrap().center
+            flat.outline_arcs
+                .iter()
+                .flatten()
+                .find_map(|c| c.arc())
+                .unwrap()
+                .center
         };
         // Not capped: the circle runs through q.
         let d = 1.5 / 2f64.sqrt();
@@ -1872,7 +2047,12 @@ mod corner_relief_tests {
         };
         let centre = |angle: f64, size: f64| {
             let flat = crate::flat::flat_pattern(&spec(angle, size)).unwrap();
-            flat.outline_arcs.iter().flatten().next().unwrap().center
+            flat.outline_arcs
+                .iter()
+                .flatten()
+                .find_map(|c| c.arc())
+                .unwrap()
+                .center
         };
         // 135 degrees: on the bisector, its circle through q (95.171573,
         // 55.171573), reaching the flanges' end lines.
@@ -2345,6 +2525,52 @@ mod corner_hem_tests {
 mod contour_tests {
     use super::*;
     use crate::spec::{Relief, ReliefShape, Width};
+
+    #[test]
+    fn a_contour_along_two_edges_is_mitered_at_their_corner() {
+        let along = |profile: &str, gap: &str| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{ "id": "t", "thickness": 2, "bend_radius": 2, "k_factor": 0.4 {gap},
+                     "base": {{ "outline": [[0,0],[100,0],[100,60],[0,60]] }},
+                     "contours": [{{ "id": "c", "on": {{ "base": 1 }}, "along": [2],
+                                    "profile": {profile}, "face": "bottom" }}] }}"#
+            ))
+            .unwrap()
+        };
+        // An L (up 30, back 15 over the base): every leg ends where the first
+        // of its faces is half the miter gap from the corner's symmetry plane;
+        // across its second bend that is a curve. Expected: flat area, the
+        // return's mitered end at the corner, volume.
+        let l = along("[[0,2],[0,32],[-15,32]]", "");
+        let flat = crate::flat::flat_pattern(&l).unwrap();
+        assert!(
+            (flat.area() - 11907.826811774863).abs() < 1e-6,
+            "{}",
+            flat.area()
+        );
+        assert!(
+            flat.outline
+                .iter()
+                .any(|p| dist2(*p, [94.585786, 88.796459]) < 1e-5),
+            "{:?}",
+            flat.outline
+        );
+        assert!(flat
+            .outline_arcs
+            .iter()
+            .flatten()
+            .any(|c| matches!(c, crate::flat::Curve::Cut(_))));
+        let v = exact_mass(&l).unwrap().volume;
+        assert!((v - 24006.485303712703).abs() < 1e-6, "{v}");
+        // One bend: two inside flanges with the same settings.
+        let wall = along("[[0,2],[0,32]]", "");
+        let v = exact_mass(&wall).unwrap().volume;
+        assert!((v - 20762.174331051156).abs() < 1e-6, "{v}");
+        // Along edges that don't follow each other: refused.
+        let mut skip = l.clone();
+        skip.contours[0].along = vec![3];
+        assert!(matches!(fold(&skip), Err(SheetError::Invalid(_))));
+    }
 
     fn part(profile: &str, face: &str) -> PartSpec {
         arcs(profile, "[]", face)
@@ -3453,4 +3679,9 @@ impl FrameExt for Frame3 {
             scale(self.z, v[2]),
         )
     }
+}
+
+#[cfg(test)]
+fn dist2(a: P2, b: P2) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }

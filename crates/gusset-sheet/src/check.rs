@@ -5,7 +5,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::flat::{layout, Arc, Zone};
+use crate::flat::{layout, Curve, Zone};
 use crate::spec::PartSpec;
 use crate::SheetError;
 
@@ -186,13 +186,18 @@ pub fn check(spec: &PartSpec, rules: &Rules) -> Result<Vec<Finding>, SheetError>
 }
 
 /// A closed boundary as points, arcs in pieces of at most 3 degrees.
-fn polyline(points: &[P2], arcs: &[Option<Arc>]) -> Vec<P2> {
+fn polyline(points: &[P2], arcs: &[Option<Curve>]) -> Vec<P2> {
     let n = points.len();
     let mut out = Vec::new();
     for k in 0..n {
         let (p, q) = (points[k], points[(k + 1) % n]);
         out.push(p);
-        if let Some(a) = arcs.get(k).copied().flatten() {
+        if let Some(Curve::Cut(c)) = arcs.get(k).copied().flatten() {
+            let line = c.points(p, q, 64);
+            out.extend(&line[1..line.len() - 1]);
+            continue;
+        }
+        if let Some(a) = arcs.get(k).copied().flatten().and_then(Curve::arc) {
             let (u, v) = (sub(p, a.center), sub(q, a.center));
             let mut sweep = (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1]);
             if !a.ccw {
