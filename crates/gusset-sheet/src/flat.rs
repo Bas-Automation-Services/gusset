@@ -1,0 +1,2166 @@
+//! The flat pattern, built directly in flat space (flat-first): the base stays
+//! where the spec puts it, and each flange adds a bend strip and a flange strip
+//! beyond its base edge. Exact by construction; nothing is unfolded.
+//!
+//! Each base edge `a -> b` is laid out in its own coordinates: `t` along the
+//! edge from `a`, `s` along the outward normal from the edge.
+
+use crate::cut::Clip;
+use crate::spec::{CornerCut, CornerShape, EdgeRef, Hole, PartSpec, ReliefShape, Seam, Side};
+use crate::SheetError;
+
+pub type P2 = [f64; 2];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlatPattern {
+    /// Counter-clockwise outer boundary, base frame (z = 0 face seen from +z).
+    pub outline: Vec<P2>,
+    /// Per outline segment (`outline[k]` to `outline[k + 1]`): an arc, or a line.
+    pub outline_arcs: Vec<Option<Arc>>,
+    pub holes: Vec<Hole>,
+    /// Cut-outs, counter-clockwise.
+    pub cutouts: Vec<Ring>,
+    pub bends: Vec<FlatBend>,
+}
+
+/// A closed boundary of lines and arcs: `arcs[k]` is the segment starting at
+/// `points[k]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ring {
+    pub points: Vec<P2>,
+    pub arcs: Vec<Option<Arc>>,
+}
+
+impl Ring {
+    /// From a spec cut-out: bulges to arc centres.
+    pub fn from_cutout(c: &crate::spec::Cutout) -> Ring {
+        let n = c.outline.len();
+        let arcs = (0..n)
+            .map(|k| {
+                let b = c.bulges.get(k).copied().unwrap_or(0.0);
+                if b.abs() < 1e-12 {
+                    return None;
+                }
+                let (p, q) = (c.outline[k], c.outline[(k + 1) % n]);
+                let sweep = 4.0 * b.atan();
+                let d = sub(q, p);
+                let chord = dot(d, d).sqrt();
+                let left = [-d[1] / chord, d[0] / chord];
+                let mid = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+                let h = chord / 2.0 / (sweep / 2.0).tan();
+                Some(Arc {
+                    center: add(mid, scale(left, h)),
+                    ccw: b > 0.0,
+                })
+            })
+            .collect();
+        Ring {
+            points: c.outline.clone(),
+            arcs,
+        }
+    }
+
+    /// The same boundary run the other way.
+    pub fn reversed(&self) -> Ring {
+        let n = self.points.len();
+        let points: Vec<P2> = (0..n).map(|k| self.points[(n - k) % n]).collect();
+        // Segment k of the reversed ring is segment (n - 1 - k) of this one.
+        let arcs = (0..n)
+            .map(|k| {
+                self.arcs[n - 1 - k].map(|a| Arc {
+                    center: a.center,
+                    ccw: !a.ccw,
+                })
+            })
+            .collect();
+        Ring { points, arcs }
+    }
+
+    pub fn area(&self) -> f64 {
+        path_area(&self.points, &self.arcs)
+    }
+}
+
+/// A boundary segment that runs around `center` instead of straight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arc {
+    pub center: P2,
+    /// Counter-clockwise from the segment's start to its end (seen from +z).
+    pub ccw: bool,
+}
+
+impl Arc {
+    /// Signed sweep from `from` to `to` (positive counter-clockwise).
+    pub fn sweep(&self, from: P2, to: P2) -> f64 {
+        let angle = |p: P2| (p[1] - self.center[1]).atan2(p[0] - self.center[0]);
+        let d = (angle(to) - angle(from)).rem_euclid(std::f64::consts::TAU);
+        let d = if d < EPS { std::f64::consts::TAU } else { d };
+        if self.ccw {
+            d
+        } else {
+            d - std::f64::consts::TAU
+        }
+    }
+}
+
+/// Boundary points with an optional arc per segment; `arcs[k]` is the segment
+/// starting at `pts[k]`.
+#[derive(Clone, Debug, Default)]
+struct Path {
+    pts: Vec<P2>,
+    arcs: Vec<Option<Arc>>,
+}
+
+impl Path {
+    /// A straight segment from the last point to `p`.
+    fn line(&mut self, p: P2) {
+        if self
+            .pts
+            .last()
+            .is_some_and(|q| dot(sub(*q, p), sub(*q, p)) < EPS * EPS)
+        {
+            return;
+        }
+        self.pts.push(p);
+        self.arcs.push(None);
+    }
+    /// An arc around `center` from the last point to `p`, passing `via`.
+    fn arc(&mut self, p: P2, center: P2, via: P2) {
+        let from = *self.pts.last().unwrap();
+        let (a, b) = (sub(from, center), sub(via, center));
+        *self.arcs.last_mut().unwrap() = Some(Arc {
+            center,
+            ccw: a[0] * b[1] - a[1] * b[0] > 0.0,
+        });
+        self.line(p);
+    }
+    fn close(&mut self) {
+        while self.pts.len() > 1
+            && dot(
+                sub(self.pts[0], self.pts[self.pts.len() - 1]),
+                sub(self.pts[0], self.pts[self.pts.len() - 1]),
+            ) < EPS * EPS
+        {
+            self.pts.pop();
+            self.arcs.pop();
+        }
+    }
+}
+
+/// Exact signed area of a closed boundary with arc segments (Green's theorem).
+pub fn path_area(pts: &[P2], arcs: &[Option<Arc>]) -> f64 {
+    (0..pts.len())
+        .map(|k| {
+            let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
+            match arcs.get(k).copied().flatten() {
+                None => (p[0] * q[1] - q[0] * p[1]) / 2.0,
+                Some(arc) => {
+                    let c = arc.center;
+                    let r = dot(sub(p, c), sub(p, c)).sqrt();
+                    let a0 = (p[1] - c[1]).atan2(p[0] - c[0]);
+                    let a1 = a0 + arc.sweep(p, q);
+                    (r * r * (a1 - a0) + r * c[0] * (a1.sin() - a0.sin())
+                        - r * c[1] * (a1.cos() - a0.cos()))
+                        / 2.0
+                }
+            }
+        })
+        .sum()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlatBend {
+    pub flange: String,
+    /// Bend centre line across the flange width.
+    pub line: [P2; 2],
+    pub angle: f64,
+    pub inner_radius: f64,
+    pub k_factor: f64,
+    /// Bends toward +z (the base's top face).
+    pub up: bool,
+}
+
+/// What a base edge carries: one flange strip, possibly with lips on it.
+#[derive(Clone, Copy)]
+struct Strip {
+    /// Flange span along the edge.
+    t0: f64,
+    t1: f64,
+    /// Where the outermost flange of the chain ends, along the normal.
+    end: f64,
+    /// Where the first bend starts (negative: inside the base outline).
+    setback: f64,
+}
+
+/// How one end of a strip meets its surroundings.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    /// Flush with a square base edge that carries no flange there.
+    Free,
+    /// A partial flange's end: a relief notch.
+    Relief,
+    /// A strip's end next to a base edge that isn't square to it and carries
+    /// no flange there: the flange ends square at the vertex; the bend ends
+    /// in a slanted cut from `bend` (where its start line meets the
+    /// neighbouring edge) to the vertex at its far edge.
+    Open { bend: f64 },
+    /// A relief notch that runs on to the neighbouring edge: next to a
+    /// tangent arc (a rounded corner), a notch to `corner` (its far bottom
+    /// corner) whose far side runs on to the arc at `p`; without `corner` (the
+    /// remnant would be no longer than the minimum, also next to a straight
+    /// edge) the notch's bottom runs on to the edge at `p`. `p` trims an arc.
+    /// `round`: a round relief's run-on, a quarter circle from the strip's
+    /// side down to the notch bottom.
+    RunOn {
+        corner: Option<P2>,
+        p: P2,
+        round: bool,
+    },
+    /// Two flanges meet: the bend runs to `bend`, the flange to `flange` at
+    /// its start (positions along this edge), and on at `slope` per unit
+    /// along the edge normal. When the flange starts short of where the bend
+    /// start lines cross (`short`, that point), the bend stops there too and
+    /// the base keeps its corner at that point.
+    Corner {
+        bend: f64,
+        flange: f64,
+        slope: f64,
+        short: Option<P2>,
+        /// The corner relief: trim to bend between separate features.
+        shape: CornerShape,
+        /// The bend runs on past q to its flange's end (a small round or
+        /// square relief); the base still ends at q.
+        run_on: RunOn,
+        /// A run-on bend's end turns onto the relief: at its centre, and
+        /// where its end line first meets it. The bends split along q to the
+        /// centre; the relief cuts the rest.
+        turn: (P2, P2),
+    },
+}
+
+/// Where a bend at a corner with a small round or square relief runs past q
+///.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RunOn {
+    No,
+    /// In the flat pattern only: a relief that doesn't reach
+    /// the circle through q and both flanges' first corners folds as trim to bend.
+    Flat,
+    /// In the flat pattern and folded, with the relief cut from both.
+    Both,
+}
+
+const EPS: f64 = 1e-9;
+/// Width and depth of a tear relief's notch in 3D (fixed, whatever the
+/// thickness or the relief settings).
+const TEAR: f64 = 0.01;
+
+/// The flat pattern split into the cells that fold differently, plus how each
+/// flange folds. Input for the 3D model.
+#[derive(Clone, Debug)]
+pub struct Layout {
+    pub flat: FlatPattern,
+    /// The base (what stays in place), the bend strips and the flange strips,
+    /// with the holes cut out. Together they tile the flat pattern.
+    pub cells: Vec<Cell>,
+    pub folds: Vec<Fold>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Cell {
+    pub name: String,
+    /// Counter-clockwise, with every junction with a neighbouring cell as a
+    /// vertex.
+    pub polygon: Vec<P2>,
+    /// Per segment: an arc (relief ends, holes crossing the cell), or a line.
+    pub arcs: Vec<Option<Arc>>,
+    /// Holes that lie wholly inside the cell.
+    pub holes: Vec<Hole>,
+    /// Cut-outs that lie wholly inside the cell, clockwise.
+    pub inner: Vec<Ring>,
+    pub zone: Zone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Zone {
+    /// The part of the base that stays in place.
+    Base,
+    /// Bend strip of `folds[i]`.
+    Bend(usize),
+    /// Flat flange strip after `folds[i]`.
+    Flange(usize),
+}
+
+/// One bend, in flat coordinates: the strip `s0 .. s0 + bend_allowance` along
+/// `n` from the base edge through `edge_point` (direction `u`).
+#[derive(Clone, Debug)]
+pub struct Fold {
+    pub flange: String,
+    /// The fold this one sits on (its tip), `None` on the base.
+    pub parent: Option<usize>,
+    pub edge_point: P2,
+    pub u: P2,
+    pub n: P2,
+    pub s0: f64,
+    pub bend_allowance: f64,
+    /// Bend angle in radians.
+    pub angle: f64,
+    /// Inner bend radius.
+    pub radius: f64,
+    pub k_factor: f64,
+    /// Bends toward +z of the flat frame.
+    pub up: bool,
+}
+
+pub fn flat_pattern(spec: &PartSpec) -> Result<FlatPattern, SheetError> {
+    layout(spec).map(|l| l.flat)
+}
+
+pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
+    let spec = &*spec.resolved()?;
+    let base = &spec.base.outline;
+    let n = base.len();
+    if n < 3 || signed_area(base) <= 0.0 {
+        return Err(SheetError::Invalid(
+            "base outline must be a counter-clockwise polygon".into(),
+        ));
+    }
+    let edge = |i: usize| {
+        let (a, b) = (base[i], base[(i + 1) % n]);
+        let length = dot(sub(b, a), sub(b, a)).sqrt();
+        let u = scale(sub(b, a), 1.0 / length);
+        (a, u, [u[1], -u[0]], length)
+    };
+    let at = |i: usize, t: f64, s: f64| {
+        let (a, u, normal, _) = edge(i);
+        add(a, add(scale(u, t), scale(normal, s)))
+    };
+    // Per outline edge, its arc (rounded corners and the like).
+    let base_arcs = Ring::from_cutout(&crate::spec::Cutout {
+        outline: base.clone(),
+        bulges: spec.base.bulges.clone(),
+    })
+    .arcs;
+
+    let mut strips: Vec<Option<Strip>> = vec![None; n];
+    // Per placed flange: id, base edge, its flat end, bends toward +z.
+    let mut placed: Vec<(&str, usize, f64, bool)> = Vec::new();
+    let mut occupied = std::collections::HashSet::new();
+    let mut bends = Vec::new();
+    let mut folds: Vec<Fold> = Vec::new();
+    // Per fold: base edge, its flat end.
+    let mut fold_ends: Vec<(usize, f64)> = Vec::new();
+    let steps = crate::hem::steps(spec)?;
+    for step in &steps {
+        if !occupied.insert(step.on.clone()) {
+            return Err(SheetError::Invalid(format!(
+                "{}: its edge already has a flange",
+                step.id
+            )));
+        }
+        let (i, start, up) = match &step.on {
+            EdgeRef::Base(i) => {
+                let i = *i;
+                if i >= n {
+                    return Err(SheetError::Invalid(format!(
+                        "{}: no base edge {i}",
+                        step.id
+                    )));
+                }
+                if base_arcs[i].is_some() {
+                    return Err(SheetError::Unsupported(format!(
+                        "{}: on an arc edge",
+                        step.id
+                    )));
+                }
+                let length = edge(i).3;
+                let (t0, t1) = step
+                    .width
+                    .map_or((0.0, length), |w| (w.offset_start, length - w.offset_end));
+                if !(t0 >= 0.0 && t1 <= length && t1 - t0 > EPS) {
+                    return Err(SheetError::Invalid(format!(
+                        "{}: width doesn't fit on edge {i}",
+                        step.id
+                    )));
+                }
+                strips[i] = Some(Strip {
+                    t0,
+                    t1,
+                    end: 0.0,
+                    setback: step.setback,
+                });
+                (i, 0.0, step.side == Side::Up)
+            }
+            EdgeRef::Tip(parent) => {
+                if step.width.is_some() {
+                    return Err(SheetError::Invalid(format!(
+                        "{}: a flange on a tip spans its parent",
+                        step.id
+                    )));
+                }
+                let &(_, i, end, parent_up) = placed
+                    .iter()
+                    .find(|p| p.0 == parent.as_str())
+                    .ok_or_else(|| {
+                        SheetError::Invalid(format!("{}: no earlier flange {parent}", step.id))
+                    })?;
+                // Same turning sense as the parent means the same flat bend direction.
+                (i, end, parent_up == (step.side == Side::Up))
+            }
+        };
+        let strip = strips[i].as_mut().unwrap();
+        strip.end = start + step.reach();
+        let (a, u, normal, _) = edge(i);
+        folds.push(Fold {
+            flange: step.id.clone(),
+            parent: match &step.on {
+                EdgeRef::Base(_) => None,
+                EdgeRef::Tip(p) => folds.iter().position(|f| &f.flange == p),
+            },
+            edge_point: a,
+            u,
+            n: normal,
+            s0: start + step.setback,
+            bend_allowance: step.bend_allowance,
+            angle: step.angle.to_radians(),
+            radius: step.radius,
+            k_factor: step.k_factor,
+            up,
+        });
+        fold_ends.push((i, strip.end));
+        let centre = start + step.setback + step.bend_allowance / 2.0;
+        bends.push(FlatBend {
+            flange: step.id.clone(),
+            line: [at(i, strip.t0, centre), at(i, strip.t1, centre)],
+            angle: step.angle,
+            inner_radius: step.radius,
+            k_factor: step.k_factor,
+            up,
+        });
+        placed.push((&step.id, i, strip.end, up));
+    }
+
+    let relief = spec.relief();
+    // A bend relief's notch depth past the bend start (a tear's is fixed).
+    let notch_depth = if relief.shape == ReliefShape::Tear {
+        TEAR
+    } else {
+        relief.depth
+    };
+    // The fold that starts on each base edge, and whether a lip sits on it.
+    let root: Vec<Option<usize>> = (0..n)
+        .map(|i| (0..folds.len()).find(|&k| folds[k].parent.is_none() && fold_ends[k].0 == i))
+        .collect();
+    let has_lip = |k: usize| folds.iter().any(|f| f.parent == Some(k));
+
+    // How each end of each strip meets its surroundings.
+    let mut sides: Vec<[End; 2]> = vec![[End::Free, End::Free]; n];
+    // Each with whether it cuts the cells too, or the flat pattern only.
+    let mut corner_clips: Vec<(Clip, bool)> = Vec::new();
+    for i in 0..n {
+        let Some(st) = strips[i] else { continue };
+        let length = edge(i).3;
+        let unsupported = |what: &str| {
+            Err(SheetError::Unsupported(format!(
+                "flange on edge {i}: {what}"
+            )))
+        };
+        for (side, neighbour) in [(0, (i + n - 1) % n), (1, (i + 1) % n)] {
+            let at_corner = if side == 0 {
+                st.t0 < EPS
+            } else {
+                st.t1 > length - EPS
+            };
+            let width = if relief.shape == ReliefShape::Tear {
+                TEAR
+            } else {
+                relief.width
+            };
+            if !at_corner {
+                let remnant = if side == 0 { st.t0 } else { length - st.t1 };
+                if remnant - width <= relief.minimum_remnant + 1e-6 {
+                    // The notch's bottom runs on to the neighbouring edge
+                    // instead (also at exactly the minimum).
+                    if base_arcs[neighbour].is_some() {
+                        return unsupported("a short remnant next to an arc");
+                    }
+                    let vertex = if side == 0 {
+                        base[i]
+                    } else {
+                        base[(i + 1) % n]
+                    };
+                    // Where the notch bottom (relief depth past the bend
+                    // start) meets the neighbouring edge's line.
+                    let (u, uj) = (edge(i).1, edge(neighbour).1);
+                    let from = at(
+                        i,
+                        if side == 0 { st.t0 } else { st.t1 },
+                        st.setback - notch_depth,
+                    );
+                    let w = cross2(sub(vertex, from), uj) / cross2(u, uj);
+                    // A flange on the neighbouring edge reaching that point
+                    // would be cut through.
+                    let t_p = dot(sub(add(from, scale(u, w)), edge(neighbour).0), uj);
+                    let reached = strips[neighbour].is_some_and(|o| {
+                        if side == 0 {
+                            o.t1 > t_p - EPS
+                        } else {
+                            o.t0 < t_p + EPS
+                        }
+                    });
+                    if reached {
+                        return unsupported(
+                            "a short remnant next to a flange on the neighbouring edge",
+                        );
+                    }
+                    sides[i][side] = End::RunOn {
+                        corner: None,
+                        p: add(from, scale(u, w)),
+                        round: relief.shape == ReliefShape::Round,
+                    };
+                    continue;
+                }
+                // The notch must stay clear of a bend along the neighbouring
+                // edge (where its start line crosses this edge).
+                if let Some(other) = strips[neighbour] {
+                    let (a, u, _, _) = edge(i);
+                    let (aj, _, nj, _) = edge(neighbour);
+                    let cross = (other.setback - dot(sub(a, aj), nj)) / dot(u, nj);
+                    let reach = if side == 0 {
+                        st.t0 - width
+                    } else {
+                        st.t1 + width
+                    };
+                    let into = if side == 0 {
+                        reach < cross + EPS
+                    } else {
+                        reach > cross - EPS
+                    };
+                    // ...and that bend reaches the notch's depth from the corner.
+                    let deep = notch_depth - st.setback;
+                    let near = if side == 0 {
+                        other.t1 > edge(neighbour).3 - deep
+                    } else {
+                        other.t0 < deep
+                    };
+                    if dot(u, nj).abs() > EPS && into && near {
+                        return unsupported(
+                            "a relief notch running into the neighbouring flange's bend",
+                        );
+                    }
+                }
+                sides[i][side] = End::Relief;
+                continue;
+            }
+            if let Some(arc) = base_arcs[neighbour] {
+                // A rounded corner: the relief's notch line (its depth past
+                // the bend start) runs on until it meets the arc.
+                let (a, u, ni, _) = edge(i);
+                let vertex = if side == 0 { a } else { base[(i + 1) % n] };
+                let r = sub(vertex, arc.center);
+                let tangent = if arc.ccw {
+                    [-r[1], r[0]]
+                } else {
+                    [r[1], -r[0]]
+                };
+                let radius = dot(r, r).sqrt();
+                if cross2(tangent, u).abs() > 1e-6 * radius || dot(tangent, u) < 0.0 {
+                    return unsupported("running into an arc that isn't tangent to its edge");
+                }
+                // The arc runs from `from` to `to`.
+                let (from, to) = if side == 0 {
+                    (base[neighbour], vertex)
+                } else {
+                    (vertex, base[(neighbour + 1) % n])
+                };
+                let along = |q: P2| {
+                    let (x, y) = (sub(from, arc.center), sub(q, arc.center));
+                    let t = cross2(x, y).atan2(dot(x, y)) * if arc.ccw { 1.0 } else { -1.0 };
+                    if t < -EPS {
+                        t + std::f64::consts::TAU
+                    } else {
+                        t
+                    }
+                };
+                // Where a line through `o` along `d` meets the circle, on the
+                // far side (`sign` 1) or the near one (-1).
+                let meet = |o: P2, d: P2, sign: f64| {
+                    let w = sub(o, arc.center);
+                    let b = dot(w, d);
+                    let disc = b * b - dot(w, w) + radius * radius;
+                    (disc > 0.0).then(|| add(o, scale(d, -b + sign * disc.sqrt())))
+                };
+                // Along the edge, away from the strip.
+                let (out, end_t) = if side == 0 {
+                    (scale(u, -1.0), st.t0)
+                } else {
+                    (u, st.t1)
+                };
+                if relief.shape == ReliefShape::Tear {
+                    // The torn corner would stretch there.
+                    return unsupported("a tear relief next to an arc");
+                }
+                let depth = st.setback - relief.depth;
+                let far = end_t + if side == 0 { -width } else { width };
+                // The remnant: from the notch's far side to the arc, along the
+                // bend start line. The notch runs on to the arc when it is
+                // no longer than the minimum.
+                let remnant = meet(at(i, far, st.setback), out, 1.0)
+                    .map_or(0.0, |q| dot(sub(q, at(i, far, st.setback)), out));
+                let round = relief.shape == ReliefShape::Round;
+                let (corner, p) = if remnant <= relief.minimum_remnant + 1e-6 {
+                    // A round notch keeps its quarter circle on the strip's
+                    // side.
+                    (None, meet(at(i, end_t, depth), out, 1.0))
+                } else if round {
+                    // Its whole half circle, then on from its far side at the
+                    // centre line.
+                    let c = at(i, far, depth + relief.width / 2.0);
+                    (Some(c), meet(c, ni, 1.0))
+                } else {
+                    (Some(at(i, far, depth)), meet(at(i, far, depth), ni, 1.0))
+                };
+                let Some(p) = p.filter(|&p| along(p) <= along(to) + EPS) else {
+                    return unsupported("running into an arc too small for its relief");
+                };
+                sides[i][side] = End::RunOn { corner, p, round };
+                continue;
+            }
+            // A strip's free end next to an edge that isn't square: the bend
+            // start line meets that edge at P. Where two flanges meet, any
+            // angle.
+            let square_edges = dot(edge(neighbour).1, edge(i).1).abs() <= EPS;
+            let open = || -> Result<End, SheetError> {
+                let (a, u, ni, _) = edge(i);
+                let (aj, uj, _, lj) = edge(neighbour);
+                // a + t u + s0 ni = aj + w uj.
+                let det = -cross2(u, uj);
+                let rhs = sub(aj, add(a, scale(ni, st.setback)));
+                let (t, w) = (-cross2(rhs, uj) / det, cross2(u, rhs) / det);
+                if !(w > EPS && w < lj - EPS) {
+                    return Err(SheetError::Unsupported(format!(
+                        "flange on edge {i}: its bend start runs past the neighbouring edge"
+                    )));
+                }
+                Ok(End::Open { bend: t })
+            };
+            let Some(other) = strips[neighbour] else {
+                if !square_edges {
+                    sides[i][side] = open()?;
+                }
+                continue;
+            };
+            let other_length = edge(neighbour).3;
+            let meets = if side == 0 {
+                other.t1 > other_length - EPS
+            } else {
+                other.t0 < EPS
+            };
+            if !meets {
+                if !square_edges {
+                    sides[i][side] = open()?;
+                }
+                continue;
+            }
+            // Two flanges meet here: a trim-to-bend corner with a gap.
+            let (k, m) = (root[i].unwrap(), root[neighbour].unwrap());
+            let contour = |k: usize| spec.contours.iter().any(|c| c.id == folds[k].flange);
+            // One flange feature with two edges: same settings.
+            // A hem has no spec flange, so it never has the same settings.
+            let spec_of = |k: usize| spec.flanges.iter().find(|f| f.id == folds[k].flange);
+            let same = match (spec_of(k), spec_of(m)) {
+                (Some(a), Some(b)) => {
+                    a.angle == b.angle
+                        && a.bend_radius == b.bend_radius
+                        && a.k_factor == b.k_factor
+                        && a.length == b.length
+                        && a.datum == b.datum
+                        && a.position == b.position
+                        && a.side == b.side
+                }
+                _ => false,
+            };
+            // A lip on one of the two flanges continues its flange's corner
+            // edge; lips on
+            // both would meet too, and don't unfold.
+            let lips = has_lip(k) || has_lip(m);
+            if has_lip(k) && has_lip(m) && !(contour(k) && contour(m)) {
+                return unsupported("lips or hems on both flanges at a corner");
+            }
+            // Two hems meeting fold, but don't unfold.
+            if spec_of(k).is_none() && spec_of(m).is_none() && !contour(k) && !contour(m) {
+                return unsupported(if contour(k) || contour(m) {
+                    "a contour flange meeting a contour flange or a hem at a corner"
+                } else {
+                    "two hems meeting at a corner"
+                });
+            }
+            let (a, u, ni, _) = edge(i);
+            let (aj, uj, nj, _) = edge(neighbour);
+            // The bend ends on the line square to its edge through the point
+            // where both bend start lines cross.
+            let det = ni[0] * nj[1] - ni[1] * nj[0];
+            let (ci, cj) = (st.setback + dot(ni, a), other.setback + dot(nj, aj));
+            let q = [
+                (ci * nj[1] - cj * ni[1]) / det,
+                (ni[0] * cj - nj[0] * ci) / det,
+            ];
+            let bend = dot(sub(q, a), u);
+            let shape = relief.corner.map_or(CornerShape::TrimToBend, |c| c.shape);
+            if !same {
+                // Different settings: two features, no seam. The
+                // one built first (flanges in spec order, then contours, then
+                // hems) keeps its flange to the vertex; the other's edge ends
+                // where the first one's bend starts. Both bends stop at that
+                // line. Folds
+                // are in build order. A contour built second runs its whole
+                // profile over its shortened edge.
+                // Two features' corner gets no relief (round and weld
+                // settings change nothing).
+                // A contour's own bends are fine either way; lips on a flange
+                // aren't built here.
+                // Lips on one of the two follow their flange (on the
+                // first-built and on the second-built one).
+                let vertex_t = if side == 0 { 0.0 } else { length };
+                sides[i][side] = End::Corner {
+                    bend,
+                    flange: if k < m { vertex_t } else { bend },
+                    slope: 0.0,
+                    short: None,
+                    shape: CornerShape::TrimToBend,
+                    run_on: RunOn::No,
+                    turn: (q, q),
+                };
+                continue;
+            }
+            // The flange's inner face stops half the miter gap from the
+            // corner's vertical symmetry plane, cut square to the sheet. In
+            // the flat that is a line.
+            let vertex = if side == 0 { a } else { base[(i + 1) % n] };
+            let (into_i, into_j) = if side == 0 {
+                (u, scale(uj, -1.0))
+            } else {
+                (scale(u, -1.0), uj)
+            };
+            let b = add(into_i, into_j);
+            let b = scale(b, 1.0 / dot(b, b).sqrt());
+            let plane = if dot([b[1], -b[0]], into_i) > 0.0 {
+                [b[1], -b[0]]
+            } else {
+                [-b[1], b[0]]
+            };
+            let f = &folds[k];
+            let s_end = f.s0 + f.bend_allowance;
+            // The inner face, seen from above, at flat s past the bend.
+            let inner = |s: f64| f.s0 + f.radius * f.angle.sin() + (s - s_end) * f.angle.cos();
+            let half_gap = relief.miter_gap.unwrap_or(spec.thickness) / 2.0;
+            let t_at = |s: f64| {
+                (half_gap - dot(sub(a, vertex), plane) - inner(s) * dot(ni, plane)) / dot(u, plane)
+            };
+            let (mut flange, mut slope) = (t_at(s_end), t_at(s_end + 1.0) - t_at(s_end));
+            // An overlapping seam (square corners of 90-degree flanges):
+            // the bends end as for a miter;
+            // the overlapping flange runs on to the other's outer face, the
+            // other stops the gap short of the overlapping one's inner face.
+            let seam = relief.seam.unwrap_or_default();
+            if seam != Seam::Miter {
+                let right = square_edges
+                    && (f.angle - std::f64::consts::FRAC_PI_2).abs() < EPS
+                    && shape == CornerShape::TrimToBend
+                    && !lips;
+                if !right {
+                    return unsupported(
+                        "an overlapping seam needs a square corner of 90-degree flanges without lips or corner reliefs",
+                    );
+                }
+                // The neighbour's inner face, past its edge (a 90-degree bend).
+                let theirs = other.setback + folds[m].radius;
+                let past = if (side == 1) == (seam == Seam::Overlap) {
+                    theirs + spec.thickness
+                } else {
+                    theirs - relief.miter_gap.unwrap_or(spec.thickness)
+                };
+                flange = if side == 0 { -past } else { length + past };
+                slope = 0.0;
+            }
+            // A flange that starts short of the bend's end takes the bend
+            // with it; the base keeps its corner at q.
+            let short = if side == 0 {
+                flange > bend + EPS
+            } else {
+                flange < bend - EPS
+            };
+            let (bend, short) = if short {
+                (flange, Some(q))
+            } else {
+                (bend, None)
+            };
+            // A round or square relief. Larger than the diagonal of where the
+            // bends overlap, it
+            // is centred where the bend centre lines cross (a square of 6.25
+            // is, one of 6.2 isn't, the diagonal being 6.22). Smaller, each
+            // bend runs on to its flange's end and the relief sits on the
+            // bisector through q: its inscribed circle through q, until its
+            // corner (a circle's radius) reaches the circle through q and both
+            // flanges' first corners; then at that circle's centre. Clipped
+            // once per corner.
+            let mut run_on = RunOn::No;
+            let mut turn = (q, q);
+            let mut shape = shape;
+            if matches!(shape, CornerShape::Round | CornerShape::Square) {
+                let size = relief
+                    .corner
+                    .and_then(|c| c.size)
+                    .unwrap_or(4.0 * spec.thickness);
+                let nn = edge(neighbour).2;
+                let (ba, bb) = (folds[k].bend_allowance, folds[m].bend_allowance);
+                // The point x past edge i and y past its neighbour (outward).
+                let det = ni[0] * nn[1] - ni[1] * nn[0];
+                let point = |x: f64, y: f64| {
+                    add(
+                        vertex,
+                        [(x * nn[1] - y * ni[1]) / det, (ni[0] * y - nn[0] * x) / det],
+                    )
+                };
+                let crossing = point(st.setback + ba / 2.0, other.setback + bb / 2.0);
+                let h = size / 2.0;
+                let clip_at = |centre: P2| {
+                    if shape == CornerShape::Round {
+                        Clip::Disc { c: centre, r: h }
+                    } else {
+                        // Its diagonal on the bisector of the two edge normals
+                        // (along the edges at a square corner).
+                        let d = add(ni, nn);
+                        let d = scale(d, 1.0 / dot(d, d).sqrt());
+                        let r = std::f64::consts::FRAC_1_SQRT_2;
+                        let (x, y) = (
+                            [r * (d[0] + d[1]), r * (d[1] - d[0])],
+                            [r * (d[0] - d[1]), r * (d[0] + d[1])],
+                        );
+                        let mut q: Vec<P2> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                            .iter()
+                            .map(|&(a, b)| add(centre, add(scale(x, a * h), scale(y, b * h))))
+                            .collect();
+                        if signed_area(&q) < 0.0 {
+                            q.reverse();
+                        }
+                        Clip::Profile(Ring {
+                            arcs: vec![None; q.len()],
+                            points: q,
+                        })
+                    }
+                };
+                let overlap = [
+                    point(st.setback, other.setback),
+                    point(st.setback + ba, other.setback),
+                    point(st.setback, other.setback + bb),
+                    point(st.setback + ba, other.setback + bb),
+                ];
+                let reach = overlap
+                    .iter()
+                    .map(|&p| dist(p, crossing))
+                    .fold(0.0, f64::max);
+                let clip = if let Some(kept) = short {
+                    // The flanges end short of q, where the base keeps its
+                    // corner: the relief is centred where the bend centre
+                    // lines cross once it covers that corner, else dropped.
+                    if shape == CornerShape::Round && h > dist(crossing, kept) + EPS {
+                        Some(clip_at(crossing))
+                    } else if h > reach + EPS {
+                        return unsupported(
+                            "a square corner relief where the flange starts short of its bend",
+                        );
+                    } else {
+                        shape = CornerShape::TrimToBend;
+                        None
+                    }
+                } else if h > reach + EPS {
+                    Some(clip_at(crossing))
+                } else {
+                    let mirror = |p: P2| sub(p, scale(plane, 2.0 * dot(sub(p, vertex), plane)));
+                    let first = at(i, flange, s_end);
+                    // Capped at the centre of the circle through q and both
+                    // flanges' first corners; at a corner that isn't square,
+                    // of flanges that aren't at 90 degrees, at the middle of
+                    // those two corners.
+                    let cap = if square_edges || slope.abs() < EPS {
+                        circumcentre(q, first, mirror(first))
+                    } else {
+                        scale(add(first, mirror(first)), 0.5)
+                    };
+                    let corner = if shape == CornerShape::Round {
+                        h
+                    } else {
+                        h * std::f64::consts::SQRT_2
+                    };
+                    let capped = corner > dist(cap, q);
+                    let mut centre = if capped { cap } else { sub(q, scale(b, h)) };
+                    let mut clip = clip_at(centre);
+                    let covers = |clip: &Clip, p: P2| clip.contains(p) || clip.on_boundary(p);
+                    // Each bend runs on to its flange's end line (sloped at
+                    // flanges other than 90 degrees); those lines cross at X
+                    // on the symmetry plane (behind q, inside the base, under
+                    // 90 degrees).
+                    let run = |s: f64| at(i, flange + slope * (s - s_end), s);
+                    let side_of = |s: f64| dot(sub(run(s), vertex), plane);
+                    let (g0, g1) = (side_of(st.setback), side_of(s_end));
+                    let x = run(st.setback + (s_end - st.setback) * g0 / (g0 - g1));
+                    // Where the end line, from the flange's first corner on,
+                    // first meets the relief: the outline turns onto the
+                    // relief there.
+                    let meet = |clip: &Clip| {
+                        if covers(clip, first) {
+                            // Capped: through the flange's first corner.
+                            return Some(first);
+                        }
+                        clip.crossings(first, x)
+                            .ok()
+                            .and_then(|ts| ts.first().copied())
+                            .map(|t| add(first, scale(sub(x, first), t)))
+                    };
+                    // Whether it does, a square by its inscribed circle.
+                    if !capped && meet(&Clip::Disc { c: centre, r: h }).is_none() {
+                        // It doesn't reach the end line: it is centred on X,
+                        // in the flat only (X is in the base under 90
+                        // degrees).
+                        centre = x;
+                        clip = clip_at(x);
+                    }
+                    let Some(met) = meet(&clip) else {
+                        return unsupported("a corner relief over its flange's first corner");
+                    };
+                    turn = (centre, met);
+                    // A capped square short of the flange's first corner:
+                    // the bend's end would follow the miter there (not built).
+                    if capped && !covers(&clip, first) {
+                        return unsupported(
+                            "a square corner relief too large to touch q and too small to reach past the bend",
+                        );
+                    }
+                    run_on = if capped { RunOn::Both } else { RunOn::Flat };
+                    Some(clip)
+                };
+                if let (Some(clip), 1) = (clip, side) {
+                    corner_clips.push((clip, run_on != RunOn::Flat));
+                }
+            }
+            // A lip at a relieved corner continues its flange's edge as at a
+            // trimmed one; at a sloped
+            // flange edge it does something else.
+            if lips && (slope.abs() > EPS || short.is_some()) {
+                return unsupported("a lip at a corner whose flange edge isn't square to its edge");
+            }
+            sides[i][side] = End::Corner {
+                bend,
+                flange,
+                slope,
+                short,
+                shape,
+                run_on,
+                turn,
+            };
+        }
+    }
+    // An arc between two strips whose notches cross before reaching it is
+    // gone: both notches end where they cross.
+    let mut crossed = vec![false; n];
+    for j in 0..n {
+        let (i, k) = ((j + n - 1) % n, (j + 1) % n);
+        let (Some(arc), Some(si), Some(sk)) = (base_arcs[j], strips[i], strips[k]) else {
+            continue;
+        };
+        let (
+            End::RunOn {
+                corner: ci, p: pi, ..
+            },
+            End::RunOn {
+                corner: ck, p: pk, ..
+            },
+        ) = (sides[i][1], sides[k][0])
+        else {
+            continue;
+        };
+        let (a1, a2) = (
+            ci.unwrap_or(at(i, si.t1, si.setback - notch_depth)),
+            ck.unwrap_or(at(k, sk.t0, sk.setback - notch_depth)),
+        );
+        // Past each other along the arc: pk comes before pi.
+        let (x, y) = (sub(pi, arc.center), sub(pk, arc.center));
+        if (cross2(x, y) > 0.0) == arc.ccw {
+            continue;
+        }
+        let (d1, d2) = (sub(pi, a1), sub(pk, a2));
+        let x = add(a1, scale(d1, cross2(sub(a2, a1), d2) / cross2(d1, d2)));
+        sides[i][1] = End::RunOn {
+            corner: ci,
+            p: x,
+            round: false,
+        };
+        sides[k][0] = End::RunOn {
+            corner: ck,
+            p: x,
+            round: false,
+        };
+        crossed[j] = true;
+    }
+    // Two notches running on into the same square corner cross each other
+    // there (not built).
+    for i in 0..n {
+        let k = (i + 1) % n;
+        if let (End::RunOn { corner: None, .. }, End::RunOn { corner: None, .. }) =
+            (sides[i][1], sides[k][0])
+        {
+            return Err(SheetError::Unsupported(format!(
+                "flanges on edges {i} and {k}: short remnants on both sides of the corner"
+            )));
+        }
+    }
+
+    // Span of a strip's bend and of its flange along the edge.
+    let span = |i: usize, st: &Strip| {
+        let pick = |side: usize, t: f64| match sides[i][side] {
+            End::Corner { bend, flange, .. } => (bend, flange),
+            End::Open { bend } => (bend, t),
+            _ => (t, t),
+        };
+        let ((b0, f0), (b1, f1)) = (pick(0, st.t0), pick(1, st.t1));
+        ([b0, b1], [f0, f1])
+    };
+    let bend_end = |i: usize| {
+        let f = &folds[root[i].unwrap()];
+        f.s0 + f.bend_allowance
+    };
+    // Where the flange ends along the edge at flat s (past its bend).
+    let flange_at = |i: usize, side: usize, t: f64, s: f64| match sides[i][side] {
+        End::Corner { flange, slope, .. } => flange + slope * (s - bend_end(i)),
+        _ => t,
+    };
+    // A flange's free tip, (f0, end) to (f1, end), with its corners cut.
+    let tip =
+        |path: &mut Path, i: usize, f0: f64, f1: f64, end: f64, cut: Option<CornerCut>| match cut {
+            None => {
+                path.line(at(i, flange_at(i, 0, f0, end), end));
+                path.line(at(i, flange_at(i, 1, f1, end), end));
+            }
+            Some(CornerCut::Chamfer { distance: d }) => {
+                for p in [
+                    at(i, f0, end - d),
+                    at(i, f0 + d, end),
+                    at(i, f1 - d, end),
+                    at(i, f1, end - d),
+                ] {
+                    path.line(p);
+                }
+            }
+            Some(CornerCut::Round { radius: r }) => {
+                for (from, to, center) in [
+                    (
+                        at(i, f0, end - r),
+                        at(i, f0 + r, end),
+                        at(i, f0 + r, end - r),
+                    ),
+                    (
+                        at(i, f1 - r, end),
+                        at(i, f1, end - r),
+                        at(i, f1 - r, end - r),
+                    ),
+                ] {
+                    path.line(from);
+                    *path.arcs.last_mut().unwrap() = Some(Arc { center, ccw: true });
+                    path.line(to);
+                }
+            }
+        };
+    // The corner cut on a flange's tip, where nothing sits on it.
+    let tip_cut = |k: usize| {
+        if has_lip(k) {
+            return None;
+        }
+        spec.flanges
+            .iter()
+            .find(|f| f.id == folds[k].flange)
+            .and_then(|f| f.tip_corners)
+    };
+    let last_fold = |i: usize| (0..folds.len()).find(|&k| fold_ends[k].0 == i && !has_lip(k));
+    for (k, fold) in folds.iter().enumerate() {
+        let Some(cut) = tip_cut(k) else { continue };
+        let i = fold_ends[k].0;
+        let ([_, _], [f0, f1]) = span(i, &strips[i].unwrap());
+        let size = match cut {
+            CornerCut::Round { radius } => radius,
+            CornerCut::Chamfer { distance } => distance,
+        };
+        let square = sides[i]
+            .iter()
+            .all(|e| matches!(e, End::Free | End::Relief));
+        if !square {
+            return Err(SheetError::Unsupported(format!(
+                "{}: tip corners where its ends aren't square to it",
+                fold.flange
+            )));
+        }
+        let straight = fold_ends[k].1 - (fold.s0 + fold.bend_allowance);
+        if !(size > 0.0 && 2.0 * size < f1 - f0 - EPS && size < straight - EPS) {
+            return Err(SheetError::Invalid(format!(
+                "{}: tip corners must be smaller than half its width and its straight part",
+                fold.flange
+            )));
+        }
+    }
+
+    // A relief notch next to a strip end, walked in the edge's direction:
+    // `into` from the base edge down to the notch end and back up at `t`
+    // (start side), or the reverse (end side). Returns the path pieces.
+    if relief.shape == ReliefShape::Round && relief.depth < relief.width / 2.0 - EPS {
+        return Err(SheetError::Invalid(
+            "a round relief's depth must be at least half its width".into(),
+        ));
+    }
+    let notch = |path: &mut Path, i: usize, st: &Strip, start: bool, outline: bool| {
+        if relief.shape == ReliefShape::Tear && outline {
+            // Torn, not cut: the flat shows no notch.
+            path.line(at(i, if start { st.t0 } else { st.t1 }, 0.0));
+            return;
+        }
+        let (w, depth) = if relief.shape == ReliefShape::Tear {
+            (TEAR, TEAR)
+        } else {
+            (relief.width, relief.depth)
+        };
+        let deepest = st.setback - depth;
+        let (near, far) = if start {
+            (st.t0 - w, st.t0)
+        } else {
+            (st.t1, st.t1 + w)
+        };
+        match relief.shape {
+            ReliefShape::Straight | ReliefShape::Tear => {
+                if start {
+                    path.line(at(i, near, 0.0));
+                }
+                path.line(at(i, near, deepest));
+                path.line(at(i, far, deepest));
+                if !start {
+                    path.line(at(i, far, 0.0));
+                }
+            }
+            ReliefShape::Round => {
+                // Straight sides down to the centre line, a half circle beyond.
+                let centre = deepest + w / 2.0;
+                if start {
+                    path.line(at(i, near, 0.0));
+                }
+                path.line(at(i, near, centre));
+                path.arc(
+                    at(i, far, centre),
+                    at(i, near + w / 2.0, centre),
+                    at(i, near + w / 2.0, deepest),
+                );
+                if !start {
+                    path.line(at(i, far, 0.0));
+                }
+            }
+        }
+    };
+
+    // A round relief's notch running on to the corner: a quarter circle of
+    // half its width from the strip's side down to the notch bottom
+    //. From the bottom up at a start, the
+    // other way at an end.
+    // With `half` the notch stops short of the corner: its whole half circle,
+    // from (or to) its far side at the centre line.
+    let quarter = |path: &mut Path, i: usize, st: &Strip, start: bool, half: bool| {
+        let (r, depth) = (relief.width / 2.0, st.setback - relief.depth);
+        let h = r * std::f64::consts::FRAC_1_SQRT_2;
+        if half {
+            let (t, c) = if start {
+                (st.t0, st.t0 - r)
+            } else {
+                path.line(at(i, st.t1, depth + r));
+                (st.t1 + 2.0 * r, st.t1 + r)
+            };
+            path.arc(at(i, t, depth + r), at(i, c, depth + r), at(i, c, depth));
+        } else if start {
+            path.line(at(i, st.t0 - r, depth));
+            path.arc(
+                at(i, st.t0, depth + r),
+                at(i, st.t0 - r, depth + r),
+                at(i, st.t0 - r + h, depth + r - h),
+            );
+        } else {
+            path.line(at(i, st.t1, depth + r));
+            path.arc(
+                at(i, st.t1 + r, depth),
+                at(i, st.t1 + r, depth + r),
+                at(i, st.t1 + r - h, depth + r - h),
+            );
+        }
+    };
+    // A tear's flat closes the corner after edge i: the two flange edges run
+    // on until they meet.
+    let meet = |i: usize| {
+        let line = |e: usize, side: usize| {
+            let f = |s: f64| at(e, flange_at(e, side, 0.0, s), s);
+            (f(bend_end(e)), f(bend_end(e) + 1.0))
+        };
+        let ((p, p2), (q, q2)) = (line(i, 1), line((i + 1) % n, 0));
+        let (d, e) = (sub(p2, p), sub(q2, q));
+        add(p, scale(d, cross2(sub(q, p), e) / cross2(d, e)))
+    };
+    // Welded and torn corners end each bend in a straight cut from where both
+    // bends start to its flange's corner.
+    let welded = |e: End| {
+        matches!(
+            e,
+            End::Corner {
+                shape: CornerShape::LinearWeld | CornerShape::Tear,
+                ..
+            }
+        )
+    };
+
+    // The outline, edge by edge: base corner, then the strip's profile.
+    let mut outline = Path::default();
+    for i in 0..n {
+        // A corner, or an open end on either side, cuts the base vertex off.
+        let prev = (i + n - 1) % n;
+        let corner_start = strips[i].is_some()
+            && matches!(
+                sides[i][0],
+                End::Corner { .. } | End::Open { .. } | End::RunOn { .. }
+            )
+            || strips[prev].is_some()
+                && matches!(sides[prev][1], End::Open { .. } | End::RunOn { .. });
+        if !corner_start {
+            outline.line(base[i]);
+            if strips[i].is_none() && base_arcs[i].is_some() {
+                *outline.arcs.last_mut().unwrap() = base_arcs[i];
+            }
+        }
+        let Some(st) = strips[i] else { continue };
+        let ([b0, b1], [f0, f1]) = span(i, &st);
+        let be = bend_end(i);
+        match sides[i][0] {
+            End::Free => {}
+            End::Open { .. } => {
+                outline.line(at(i, b0, st.setback));
+                outline.line(at(i, st.t0, be));
+            }
+            End::Relief => notch(&mut outline, i, &st, true, true),
+            End::RunOn { corner, p, round } => {
+                outline.line(p);
+                if let Some(c) = corner {
+                    outline.line(c);
+                }
+                if round {
+                    quarter(&mut outline, i, &st, true, corner.is_some());
+                } else {
+                    outline.line(at(i, st.t0, st.setback - notch_depth));
+                }
+            }
+            End::Corner {
+                short,
+                shape,
+                run_on,
+                turn,
+                ..
+            } => {
+                if let Some(q) = short {
+                    outline.line(q);
+                }
+                let pieces = match shape {
+                    // The flange edges run on until they meet.
+                    CornerShape::Tear => vec![meet((i + n - 1) % n)],
+                    CornerShape::LinearWeld => vec![at(i, b0, st.setback), at(i, f0, be)],
+                    // Bends run on: their ends cross on the symmetry plane.
+                    _ if run_on != RunOn::No => vec![turn.0, turn.1, at(i, f0, be)],
+                    _ => vec![at(i, b0, st.setback), at(i, b0, be), at(i, f0, be)],
+                };
+                for p in pieces {
+                    outline.line(p);
+                }
+            }
+        }
+        tip(
+            &mut outline,
+            i,
+            f0,
+            f1,
+            st.end,
+            last_fold(i).and_then(tip_cut),
+        );
+        match sides[i][1] {
+            End::Free => {}
+            End::Open { .. } => {
+                outline.line(at(i, st.t1, be));
+                outline.line(at(i, b1, st.setback));
+            }
+            End::Relief => notch(&mut outline, i, &st, false, true),
+            End::RunOn { corner, p, round } => {
+                if round {
+                    quarter(&mut outline, i, &st, false, corner.is_some());
+                } else {
+                    outline.line(at(i, st.t1, st.setback - notch_depth));
+                }
+                if let Some(c) = corner {
+                    outline.line(c);
+                }
+                outline.line(p);
+                if !crossed[(i + 1) % n] {
+                    *outline.arcs.last_mut().unwrap() = base_arcs[(i + 1) % n];
+                }
+            }
+            End::Corner {
+                shape,
+                run_on,
+                turn,
+                ..
+            } => {
+                let pieces = match shape {
+                    CornerShape::Tear => vec![meet(i)],
+                    CornerShape::LinearWeld => vec![at(i, f1, be), at(i, b1, st.setback)],
+                    _ if run_on != RunOn::No => vec![at(i, f1, be), turn.1, turn.0],
+                    _ => vec![at(i, f1, be), at(i, b1, be), at(i, b1, st.setback)],
+                };
+                for p in pieces {
+                    outline.line(p);
+                }
+            }
+        }
+    }
+    outline.close();
+    simplify(&mut outline.pts, &mut outline.arcs, true);
+
+    // The base cell: the outline with every flanged span cut back to its bend
+    // start, keeping the junctions with the strips as vertices.
+    let mut base_cell = Path::default();
+    for i in 0..n {
+        let prev = (i + n - 1) % n;
+        if let (Some(p), End::Corner { short: Some(q), .. }) = (strips[prev], sides[i][0]) {
+            // The neighbour's bend start, the corner, then this one's.
+            base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
+            base_cell.line(q);
+        }
+        let depth = |st: &Strip| st.setback - notch_depth;
+        match (strips[i], strips[prev], sides[i][0], sides[prev][1]) {
+            // Along the neighbouring edge to a notch that runs on.
+            (Some(st), _, End::RunOn { corner, p, round }, _) => {
+                base_cell.line(p);
+                if let Some(c) = corner {
+                    base_cell.line(c);
+                }
+                if round {
+                    quarter(&mut base_cell, i, &st, true, corner.is_some());
+                } else {
+                    base_cell.line(at(i, st.t0, depth(&st)));
+                }
+                base_cell.line(at(i, span(i, &st).0[0], st.setback));
+            }
+            (Some(st), _, end, _) if !matches!(end, End::Relief) => {
+                base_cell.line(at(i, span(i, &st).0[0], st.setback));
+            }
+            (
+                _,
+                Some(p),
+                _,
+                End::RunOn {
+                    corner,
+                    p: q,
+                    round,
+                },
+            ) => {
+                base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
+                if round {
+                    quarter(&mut base_cell, prev, &p, false, corner.is_some());
+                } else {
+                    base_cell.line(at(prev, p.t1, depth(&p)));
+                }
+                if let Some(c) = corner {
+                    base_cell.line(c);
+                }
+                base_cell.line(q);
+            }
+            (_, Some(p), _, end) if !matches!(end, End::Relief) => {
+                base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
+            }
+            _ => base_cell.line(base[i]),
+        }
+        if strips[i].is_none() && base_arcs[i].is_some() && !crossed[i] {
+            *base_cell.arcs.last_mut().unwrap() = base_arcs[i];
+        }
+        let Some(st) = strips[i] else { continue };
+        let [b0, b1] = span(i, &st).0;
+        if matches!(sides[i][0], End::Relief) {
+            notch(&mut base_cell, i, &st, true, false);
+            base_cell.line(at(i, b0, st.setback));
+        }
+        if matches!(sides[i][1], End::Relief) {
+            base_cell.line(at(i, b1, st.setback));
+            base_cell.line(at(i, st.t1, st.setback));
+            notch(&mut base_cell, i, &st, false, false);
+        }
+    }
+    base_cell.close();
+
+    // Strips: per fold its bend, then its flat flange up to the next bend
+    // (a lip on its tip) or its own end. A flange wider than its bend (at a
+    // corner) keeps the bend's ends as vertices on its bottom edge.
+    let mut cells = vec![Cell {
+        name: "base".into(),
+        polygon: base_cell.pts,
+        arcs: base_cell.arcs,
+        holes: Vec::new(),
+        inner: Vec::new(),
+        zone: Zone::Base,
+    }];
+    for (k, fold) in folds.iter().enumerate() {
+        let (i, end) = fold_ends[k];
+        let st = strips[i].unwrap();
+        let ([b0, b1], [f0, f1]) = span(i, &st);
+        // A lip spans its parent flange, not the base bend.
+        let (b0, b1) = if fold.parent.is_some() {
+            (f0, f1)
+        } else {
+            (b0, b1)
+        };
+        // Where the bend ends along the edge at its far side: at a welded
+        // corner, where the flange ends.
+        let corner = |side: usize| welded(sides[i][side]);
+        let open = |side: usize| matches!(sides[i][side], End::Open { .. });
+        // A bend that runs on to its flange's end, start and far side: the
+        // cell where it folds so, its bend line wherever it does.
+        let runs = |side: usize, how: &[RunOn]| {
+            fold.parent.is_none()
+                && matches!(sides[i][side], End::Corner { run_on, .. } if how.contains(&run_on))
+        };
+        let run_on = |side: usize| runs(side, &[RunOn::Both]);
+        let line_on = |side: usize| runs(side, &[RunOn::Both, RunOn::Flat]);
+        let (q0, q1) = (b0, b1);
+        let (b0, b1) = (
+            if run_on(0) { f0 } else { b0 },
+            if run_on(1) { f1 } else { b1 },
+        );
+        // A run-on bend's cell: from q along the corner's diagonal to where
+        // both bends' ends cross, then along its own end.
+        let start = |side: usize, t: f64| match sides[i][side] {
+            End::Corner { turn, .. } if run_on(side) => {
+                if side == 0 {
+                    vec![turn.0, turn.1]
+                } else {
+                    vec![turn.1, turn.0]
+                }
+            }
+            _ => vec![at(i, t, fold.s0)],
+        };
+        let e0 = if corner(0) || run_on(0) {
+            f0
+        } else if open(0) {
+            st.t0
+        } else {
+            b0
+        };
+        let e1 = if corner(1) || run_on(1) {
+            f1
+        } else if open(1) {
+            st.t1
+        } else {
+            b1
+        };
+        let fold_bend_end = fold.s0 + fold.bend_allowance;
+        let flange_end = folds
+            .iter()
+            .find(|f| f.parent == Some(k))
+            .map_or(end, |child| child.s0);
+        // (t, s) is a mirrored frame, so this order is counter-clockwise in x, y.
+        // A flange narrower than its bend at a corner leaves its ends as
+        // vertices on the bend's far edge.
+        let mut bend = start(0, b0);
+        bend.push(at(i, e0, fold_bend_end));
+        for t in [f0, f1] {
+            if t > e0 + EPS && t < e1 - EPS {
+                bend.push(at(i, t, fold_bend_end));
+            }
+        }
+        bend.push(at(i, e1, fold_bend_end));
+        bend.extend(start(1, b1));
+        // A bend run on past q keeps q, where the base ends, as a vertex.
+        if run_on(1) {
+            bend.push(at(i, q1, fold.s0));
+        }
+        if run_on(0) {
+            bend.push(at(i, q0, fold.s0));
+        }
+        cells.push(Cell {
+            name: format!("{}.bend", fold.flange),
+            arcs: vec![None; bend.len()],
+            polygon: bend,
+            holes: Vec::new(),
+            inner: Vec::new(),
+            zone: Zone::Bend(k),
+        });
+        let mut flange = Path::default();
+        flange.line(at(i, f0, fold_bend_end));
+        tip(&mut flange, i, f0, f1, flange_end, tip_cut(k));
+        flange.line(at(i, f1, fold_bend_end));
+        for t in [e1, e0] {
+            if (t - f0).abs() > EPS && (t - f1).abs() > EPS {
+                flange.line(at(i, t, fold_bend_end));
+            }
+        }
+        // A bend with nothing straight after it (a rolled hem) has no flange cell.
+        if flange_end - fold_bend_end > EPS {
+            cells.push(Cell {
+                name: fold.flange.clone(),
+                arcs: flange.arcs,
+                polygon: flange.pts,
+                holes: Vec::new(),
+                inner: Vec::new(),
+                zone: Zone::Flange(k),
+            });
+        }
+        let centre = fold.s0 + fold.bend_allowance / 2.0;
+        // At a welded corner the bend line ends halfway along the slanted
+        // end; at a torn one, on the flange edge run back over the bend (the
+        // flat shows the corner closed).
+        let mid = |side: usize, b: f64, e: f64| {
+            if matches!(
+                sides[i][side],
+                End::Corner {
+                    shape: CornerShape::Tear,
+                    ..
+                }
+            ) {
+                flange_at(i, side, e, centre)
+            } else {
+                (b + e) / 2.0
+            }
+        };
+        // A run-on bend's line runs to its end: the end line, then the turn
+        // onto the relief (which then cuts it).
+        let ends = |side: usize, f: f64| -> f64 {
+            let End::Corner { turn: (c, h), .. } = sides[i][side] else {
+                return f;
+            };
+            let p0 = at(i, 0.0, centre);
+            let u = sub(at(i, 1.0, centre), p0);
+            for (a, b) in [(at(i, f, fold_bend_end), h), (h, c)] {
+                let d = sub(b, a);
+                let den = cross2(u, d);
+                if den.abs() < EPS {
+                    continue;
+                }
+                let w = sub(a, p0);
+                if (-EPS..=1.0 + EPS).contains(&(cross2(w, u) / den)) {
+                    return cross2(w, d) / den;
+                }
+            }
+            flange_at(i, side, f, centre)
+        };
+        let (l0, l1) = (
+            if line_on(0) {
+                ends(0, f0)
+            } else {
+                mid(0, b0, e0)
+            },
+            if line_on(1) {
+                ends(1, f1)
+            } else {
+                mid(1, b1, e1)
+            },
+        );
+        bends[k].line = [at(i, l0, centre), at(i, l1, centre)];
+    }
+
+    let mut layout = Layout {
+        flat: FlatPattern {
+            outline: outline.pts,
+            outline_arcs: outline.arcs,
+            holes: spec.base.holes.clone(),
+            cutouts: spec.base.cutouts.iter().map(Ring::from_cutout).collect(),
+            bends,
+        },
+        cells,
+        folds,
+    };
+    for (clip, cells) in &corner_clips {
+        crate::cut::cut_corner(&mut layout, clip, *cells)?;
+    }
+    if !spec.folds.is_empty() {
+        crate::foldline::apply_folds(&mut layout, spec)?;
+    }
+    // A hole across the outline is a round notch: a circular cut-out.
+    let (across, inside): (Vec<Hole>, Vec<Hole>) = spec
+        .base
+        .holes
+        .iter()
+        .cloned()
+        .partition(|h| crate::cut::crosses_outline(&layout.flat, h));
+    layout.flat.holes = inside.clone();
+    let notches = across.iter().map(|h| {
+        let (c, r) = (h.center, h.diameter / 2.0);
+        let arc = Some(Arc {
+            center: c,
+            ccw: true,
+        });
+        // Two half circles, from an odd angle: a hole centred on an edge
+        // would otherwise have its vertices on that edge.
+        let (sin, cos) = 1f64.sin_cos();
+        Ring {
+            points: vec![
+                [c[0] + r * cos, c[1] + r * sin],
+                [c[0] - r * cos, c[1] - r * sin],
+            ],
+            arcs: vec![arc, arc],
+        }
+    });
+    layout.flat.cutouts.extend(notches);
+    crate::cut::cut_holes(&mut layout, &inside)?;
+    crate::cut::cut_cutouts(&mut layout)?;
+    simplify(
+        &mut layout.flat.outline,
+        &mut layout.flat.outline_arcs,
+        true,
+    );
+    // In the cells only arcs: a straight run's points may be junctions with
+    // a neighbouring cell, a hole's edge never is.
+    for c in &mut layout.cells {
+        simplify(&mut c.polygon, &mut c.arcs, false);
+    }
+    Ok(layout)
+}
+
+impl FlatPattern {
+    /// Area of the flat blank: outline minus holes and cut-outs.
+    pub fn area(&self) -> f64 {
+        path_area(&self.outline, &self.outline_arcs)
+            - self.cutouts.iter().map(Ring::area).sum::<f64>()
+            - self
+                .holes
+                .iter()
+                .map(|h| std::f64::consts::PI * h.diameter * h.diameter / 4.0)
+                .sum::<f64>()
+    }
+}
+
+fn signed_area(p: &[P2]) -> f64 {
+    (0..p.len())
+        .map(|i| {
+            let (a, b) = (p[i], p[(i + 1) % p.len()]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum::<f64>()
+        / 2.0
+}
+fn add(a: P2, b: P2) -> P2 {
+    [a[0] + b[0], a[1] + b[1]]
+}
+fn cross2(a: P2, b: P2) -> f64 {
+    a[0] * b[1] - a[1] * b[0]
+}
+/// Drops points in the middle of a straight run (e.g. a base corner that a
+/// full-width flange strip continues past) or of one circle's arc (a round
+/// notch's two halves).
+fn simplify(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Arc>>, lines: bool) {
+    loop {
+        let len = pts.len();
+        let drop = (0..len).find(|&k| {
+            let prev = (k + len - 1) % len;
+            let (p, q, r) = (pts[prev], pts[k], pts[(k + 1) % len]);
+            let (d1, d2) = (sub(q, p), sub(r, q));
+            let straight = lines
+                && arcs[prev].is_none()
+                && arcs[k].is_none()
+                && (d1[0] * d2[1] - d1[1] * d2[0]).abs() < EPS
+                && dot(d1, d2) > 0.0;
+            let one_circle = match (arcs[prev], arcs[k]) {
+                (Some(a), Some(b)) => dist(a.center, b.center) < EPS && a.ccw == b.ccw,
+                _ => false,
+            };
+            straight || one_circle
+        });
+        let Some(k) = drop else { break };
+        pts.remove(k);
+        arcs.remove(k);
+    }
+}
+
+fn dist(a: P2, b: P2) -> f64 {
+    dot(sub(a, b), sub(a, b)).sqrt()
+}
+
+/// The centre of the circle through three points.
+fn circumcentre(a: P2, b: P2, c: P2) -> P2 {
+    let (b, c) = (sub(b, a), sub(c, a));
+    let d = 2.0 * cross2(b, c);
+    let (bb, cc) = (dot(b, b), dot(c, c));
+    add(
+        a,
+        [(c[1] * bb - b[1] * cc) / d, (b[0] * cc - c[0] * bb) / d],
+    )
+}
+fn sub(a: P2, b: P2) -> P2 {
+    [a[0] - b[0], a[1] - b[1]]
+}
+fn scale(a: P2, s: f64) -> P2 {
+    [a[0] * s, a[1] * s]
+}
+fn dot(a: P2, b: P2) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::ReliefShape;
+    use crate::spec::{Base, BendPosition, Flange, HeightDatum, Width};
+
+    fn plate(flanges: Vec<Flange>) -> PartSpec {
+        PartSpec {
+            id: "t".into(),
+            thickness: 2.0,
+            bend_radius: 2.0,
+            k_factor: 0.4,
+            bend_table: None,
+            relief: None,
+            base: Base {
+                outline: vec![[0.0, 0.0], [100.0, 0.0], [100.0, 60.0], [0.0, 60.0]],
+                holes: vec![Hole {
+                    center: [20.0, 30.0],
+                    diameter: 8.0,
+                }],
+                ..Default::default()
+            },
+            flanges,
+            contours: Vec::new(),
+            hems: Vec::new(),
+            folds: Vec::new(),
+
+            jogs: Vec::new(),
+        }
+    }
+
+    fn flange(edge: usize) -> Flange {
+        Flange {
+            id: format!("f{edge}"),
+            on: EdgeRef::Base(edge),
+            width: None,
+            angle: 90.0,
+            length: 30.0,
+            datum: HeightDatum::Outer,
+            position: BendPosition::Outside,
+            side: Side::Up,
+            tip_corners: None,
+            bend_radius: None,
+            k_factor: None,
+        }
+    }
+
+    const REACH: f64 = 28.3982297150257; // Expected: 88.398... - 60
+
+    fn has(outline: &[P2], p: P2) -> bool {
+        outline
+            .iter()
+            .any(|q| (q[0] - p[0]).abs() < 1e-9 && (q[1] - p[1]).abs() < 1e-9)
+    }
+
+    #[test]
+    fn a_plate_is_its_own_flat_pattern() {
+        let flat = flat_pattern(&plate(vec![])).unwrap();
+        assert_eq!(flat.outline, plate(vec![]).base.outline);
+        assert!((flat.area() - (6000.0 - std::f64::consts::PI * 16.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_flange_moves_its_edge_out_and_puts_the_bend_line_mid_strip() {
+        let flat = flat_pattern(&plate(vec![flange(2)])).unwrap();
+        assert!(has(&flat.outline, [100.0, 60.0 + REACH]));
+        assert!(has(&flat.outline, [0.0, 60.0 + REACH]));
+        // Bend starts 2 mm inside the edge, strip is 4.398 mm wide.
+        let centre = 60.0 - 2.0 + 0.5 * std::f64::consts::FRAC_PI_2 * 2.8;
+        assert!((flat.bends[0].line[0][1] - centre).abs() < 1e-9);
+        assert!(flat.bends[0].up);
+    }
+
+    #[test]
+    fn a_partial_flange_gets_relief_notches() {
+        // Edge 2 runs (100,60) -> (0,60); offsets 30 from (100,60), 20 from (0,60).
+        let partial = Flange {
+            width: Some(Width {
+                offset_start: 30.0,
+                offset_end: 20.0,
+            }),
+            ..flange(2)
+        };
+        let flat = flat_pattern(&plate(vec![partial])).unwrap();
+        // Expected: notches 2 wide reaching to y = 57 (bend start 58, depth 1).
+        for p in [
+            [72.0, 60.0],
+            [72.0, 57.0],
+            [70.0, 57.0],
+            [70.0, 60.0 + REACH],
+            [20.0, 60.0 + REACH],
+            [20.0, 57.0],
+            [18.0, 57.0],
+            [18.0, 60.0],
+        ] {
+            assert!(
+                has(&flat.outline, p),
+                "{p:?} missing from {:?}",
+                flat.outline
+            );
+        }
+        let bend = &flat.bends[0];
+        assert!((bend.line[0][0] - 70.0).abs() < 1e-9 && (bend.line[1][0] - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_lip_on_a_flange_adds_its_reach_and_keeps_or_flips_the_bend_direction() {
+        for (side, lip_up) in [(Side::Up, true), (Side::Down, false)] {
+            let lip = Flange {
+                id: "lip".into(),
+                on: EdgeRef::Tip("f2".into()),
+                length: 15.0,
+                side,
+                ..flange(2)
+            };
+            let flat = flat_pattern(&plate(vec![flange(2), lip])).unwrap();
+            // Expected: 101.7965 mm for either lip direction.
+            let top = flat.outline.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+            assert!((top - 101.79645943005142).abs() < 1e-9, "{top}");
+            assert_eq!(flat.bends[1].up, lip_up);
+            let centre = 60.0 + REACH - 2.0 + 0.5 * std::f64::consts::FRAC_PI_2 * 2.8;
+            assert!((flat.bends[1].line[0][1] - centre).abs() < 1e-9);
+        }
+        let orphan = Flange {
+            on: EdgeRef::Tip("nope".into()),
+            ..flange(2)
+        };
+        assert!(matches!(
+            flat_pattern(&plate(vec![orphan])),
+            Err(SheetError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn two_flanges_meeting_at_a_corner_trim_to_their_bends() {
+        let flat = flat_pattern(&plate(vec![flange(1), flange(2)])).unwrap();
+        // Expected (trim to bend, miter gap T): each bend runs to the other's
+        // bend start (x 98 / y 58), each flange stops T/sqrt(2) short of the
+        // other's inner face (x 98.586 / y 58.586).
+        let g = 2.0 - std::f64::consts::SQRT_2;
+        let bend_end = 98.0 + 4.3982297150257;
+        for p in [
+            [0.0, 0.0],
+            [100.0 + REACH, 0.0],
+            [100.0 + REACH, 58.0 + g],
+            [bend_end, 58.0 + g],
+            [bend_end, 58.0],
+            [98.0, 58.0],
+            [98.0, 58.0 + 4.3982297150257],
+            [98.0 + g, 58.0 + 4.3982297150257],
+            [98.0 + g, 60.0 + REACH],
+            [0.0, 60.0 + REACH],
+        ] {
+            assert!(
+                has(&flat.outline, p),
+                "{p:?} missing from {:?}",
+                flat.outline
+            );
+        }
+        assert_eq!(flat.outline.len(), 10);
+    }
+    fn round_relief(depth: f64) -> PartSpec {
+        let mut part = plate(vec![Flange {
+            width: Some(Width {
+                offset_start: 30.0,
+                offset_end: 20.0,
+            }),
+            ..flange(2)
+        }]);
+        part.relief = Some(crate::spec::Relief {
+            shape: ReliefShape::Round,
+            width: 2.0,
+            depth,
+            minimum_remnant: 4.0,
+            miter_gap: None,
+            corner: None,
+            seam: None,
+        });
+        part
+    }
+
+    #[test]
+    fn a_round_relief_ends_in_a_half_circle() {
+        // Expected: half circles of radius w/2 whose bottom is `depth` past
+        // the bend start (y 58): centres at y 58 for depth 1, y 56 for depth 3.
+        for (depth, cy) in [(1.0, 58.0), (3.0, 56.0)] {
+            let flat = flat_pattern(&round_relief(depth)).unwrap();
+            let arcs: Vec<_> = flat.outline_arcs.iter().flatten().collect();
+            assert_eq!(arcs.len(), 2);
+            for (cx, p) in [(71.0, [72.0, cy]), (19.0, [20.0, cy])] {
+                assert!(arcs
+                    .iter()
+                    .any(|a| (a.center[0] - cx).abs() < 1e-9 && (a.center[1] - cy).abs() < 1e-9));
+                assert!(
+                    has(&flat.outline, p),
+                    "{p:?} missing from {:?}",
+                    flat.outline
+                );
+            }
+            // Area: the straight notch of the same depth, minus the two corners
+            // the half circle leaves: 2 * (w^2 - pi w^2 / 4) / 2.
+            let mut straight = round_relief(depth);
+            straight.relief.as_mut().unwrap().shape = ReliefShape::Straight;
+            let corners = 2.0 * (4.0 - std::f64::consts::PI) / 2.0;
+            let diff = flat.area() - flat_pattern(&straight).unwrap().area();
+            assert!((diff - corners).abs() < 1e-9, "{diff} vs {corners}");
+        }
+        assert!(matches!(
+            flat_pattern(&round_relief(0.5)),
+            Err(SheetError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_round_relief_at_a_short_remnant_runs_on_with_a_quarter_circle() {
+        // Expected (remnant-round-start / -end): the notch runs on to the
+        // corner and keeps a quarter circle of radius w/2 on the strip's side,
+        // so it leaves one corner of the straight run-on, r^2 - pi r^2 / 4,
+        // plus the two of the half circle at the flange's other end.
+        for (start, end) in [(3.0, 30.0), (30.0, 4.0)] {
+            let mut round = round_relief(1.5);
+            round.flanges[0].width = Some(Width {
+                offset_start: start,
+                offset_end: end,
+            });
+            let mut straight = round.clone();
+            straight.relief.as_mut().unwrap().shape = ReliefShape::Straight;
+            let flat = flat_pattern(&round).unwrap();
+            assert_eq!(flat.outline_arcs.iter().flatten().count(), 2);
+            let diff = flat.area() - flat_pattern(&straight).unwrap().area();
+            let corner = 3.0 * (1.0 - std::f64::consts::PI / 4.0);
+            assert!((diff - corner).abs() < 1e-9, "{diff} vs {corner}");
+        }
+    }
+
+    #[test]
+    fn short_remnants_on_both_sides_of_a_corner_are_refused() {
+        // Both notches run on into the corner at (0, 0) and cross there (a
+        // fuzz find: the outline lost a corner and the kernel refused the
+        // fold).
+        let part: PartSpec = serde_json::from_str(
+            r#"{ "id": "a", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "relief": { "width": 2, "depth": 1, "minimum_remnant": 4 },
+                "base": { "outline": [[0,0],[70,0],[70,40],[0,40]] },
+                "flanges": [{ "id": "f0", "on": { "base": 0 }, "width": { "offset_start": 5, "offset_end": 10 },
+                              "angle": 90, "length": 20, "datum": "outer", "position": "outside", "side": "up" },
+                            { "id": "f3", "on": { "base": 3 }, "width": { "offset_start": 10, "offset_end": 5 },
+                              "angle": 90, "length": 20, "datum": "outer", "position": "outside", "side": "up" }] }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            flat_pattern(&part).unwrap_err(),
+            SheetError::Unsupported(
+                "flanges on edges 3 and 0: short remnants on both sides of the corner".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_round_relief_runs_on_to_an_arc_with_a_quarter_circle() {
+        // Expected (flange-into-arcs-round / -relief): flat areas
+        // 8126.315972323419 and 8124.599157630599, two corners r^2 - pi r^2 / 4
+        // apart (r 2). With a minimum remnant of 1 the notch stops short of
+        // the arc (flange-into-arcs-round-short): 8151.63898178028.
+        let part = |shape: &str, minimum: f64| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{ "id": "a", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "relief": {{ "shape": "{shape}", "width": 4, "depth": 3, "minimum_remnant": {minimum} }},
+                "base": {{ "outline": [[10,0],[90,0],[100,10],[100,50],[90,60],[10,60],[0,50],[0,10]],
+                           "bulges": [0,0.41421356237309503,0,0.41421356237309503,0,0.41421356237309503,0,0.41421356237309503] }},
+                "flanges": [{{ "id": "f", "on": {{ "base": 4 }}, "angle": 90, "length": 30,
+                               "datum": "outer", "position": "outside", "side": "up" }}] }}"#
+            ))
+            .unwrap()
+        };
+        let area = |shape: &str, minimum: f64| flat_pattern(&part(shape, minimum)).unwrap().area();
+        let round = area("round", 4.0);
+        assert!((round - 8126.315972323419).abs() < 1e-9, "{round}");
+        let corners = round - area("straight", 4.0);
+        assert!((corners - 2.0 * (4.0 - std::f64::consts::PI)).abs() < 1e-9);
+        let short = area("round", 1.0);
+        assert!((short - 8151.63898178028).abs() < 1e-9, "{short}");
+    }
+
+    #[test]
+    fn a_tear_relief_at_a_short_remnant_runs_on_at_the_tear_depth() {
+        // Expected: the notch runs on to the corner 0.01 past the bend
+        // start, so the flat loses the remnant strip. The flat areas of
+        // remnant-tear-start (offsets 3 / 30) and relief-tear (30 / 20) differ
+        // by 476.739905155436.
+        let torn = |start: f64, end: f64| {
+            let mut part = round_relief(1.0);
+            part.relief.as_mut().unwrap().shape = ReliefShape::Tear;
+            part.flanges[0].width = Some(Width {
+                offset_start: start,
+                offset_end: end,
+            });
+            flat_pattern(&part).unwrap().area()
+        };
+        let diff = torn(3.0, 30.0) - torn(30.0, 20.0);
+        assert!((diff - 476.739905155436).abs() < 1e-9, "{diff}");
+    }
+
+    #[test]
+    fn the_cells_tile_the_flat_outline_exactly() {
+        let partial = Flange {
+            width: Some(Width {
+                offset_start: 30.0,
+                offset_end: 20.0,
+            }),
+            ..flange(2)
+        };
+        let lip = |parent: &str| Flange {
+            id: format!("lip-{parent}"),
+            on: EdgeRef::Tip(parent.into()),
+            length: 15.0,
+            ..flange(2)
+        };
+        for flanges in [
+            vec![flange(2)],
+            vec![partial.clone()],
+            vec![partial, lip("f2")],
+            vec![flange(0), flange(2), lip("f0"), lip("f2")],
+        ] {
+            let l = layout(&plate(flanges)).unwrap();
+            let cells: f64 = l.cells.iter().map(|c| signed_area(&c.polygon)).sum();
+            let outline = signed_area(&l.flat.outline);
+            assert!(l.cells.iter().all(|c| signed_area(&c.polygon) > 0.0));
+            assert!((cells - outline).abs() < 1e-9, "{cells} vs {outline}");
+        }
+    }
+
+    fn with_holes(holes: &[([f64; 2], f64)]) -> PartSpec {
+        let mut part = plate(vec![flange(2)]);
+        part.base.holes = holes
+            .iter()
+            .map(|&(center, diameter)| Hole { center, diameter })
+            .collect();
+        part
+    }
+
+    #[test]
+    fn holes_anywhere_in_the_flat_cut_the_cells_exactly() {
+        // Edge 2 at y = 60 carries the flange: its bend runs y 58 .. 62.398.
+        for holes in [
+            vec![([50.0, 59.0], 6.0)], // across the bend start
+            vec![([50.0, 60.2], 8.0)], // across the whole bend
+            vec![([30.0, 60.2], 3.0)], // inside the bend
+            vec![([70.0, 75.0], 8.0)], // on the flange
+            vec![
+                ([20.0, 30.0], 8.0),
+                ([50.0, 60.2], 8.0),
+                ([80.0, 58.0], 3.0),
+            ],
+        ] {
+            let l = layout(&with_holes(&holes)).unwrap();
+            let cells: f64 = l
+                .cells
+                .iter()
+                .map(|c| {
+                    path_area(&c.polygon, &c.arcs)
+                        - c.holes
+                            .iter()
+                            .map(|h| std::f64::consts::PI * h.diameter * h.diameter / 4.0)
+                            .sum::<f64>()
+                })
+                .sum();
+            assert!(l.cells.iter().all(|c| path_area(&c.polygon, &c.arcs) > 0.0));
+            assert!(
+                (cells - l.flat.area()).abs() < 1e-9,
+                "{holes:?}: {cells} vs {}",
+                l.flat.area()
+            );
+        }
+        // Across the whole bend, the hole splits the strip into two pieces.
+        let l = layout(&with_holes(&[([50.0, 60.2], 8.0)])).unwrap();
+        assert_eq!(
+            l.cells.iter().filter(|c| c.zone == Zone::Bend(0)).count(),
+            2
+        );
+    }
+
+    #[test]
+    fn holes_must_cross_or_clear_the_outline_and_clear_each_other() {
+        let invalid = |holes: &[([f64; 2], f64)]| {
+            matches!(layout(&with_holes(holes)), Err(SheetError::Invalid(_)))
+        };
+        assert!(!invalid(&[([50.0, 3.0], 8.0)])); // through the outline: a round notch
+        assert!(invalid(&[([50.0, 4.0], 8.0)])); // touching it
+        assert!(invalid(&[([50.0, 120.0], 8.0)])); // off the part
+        assert!(invalid(&[([50.0, 30.0], 8.0), ([55.0, 30.0], 8.0)])); // overlapping
+        assert!(!invalid(&[([50.0, 30.0], 8.0), ([60.0, 30.0], 8.0)]));
+    }
+
+    #[test]
+    fn unsupported_layouts_are_reported() {
+        let unsupported =
+            |part: &PartSpec| matches!(flat_pattern(part), Err(SheetError::Unsupported(_)));
+        // Flanges meeting at a corner: a lip on one of them, not on both.
+        let lip = |id: &str, on: &str| Flange {
+            id: id.into(),
+            on: EdgeRef::Tip(on.into()),
+            length: 15.0,
+            ..flange(2)
+        };
+        assert!(!unsupported(&plate(vec![
+            flange(1),
+            flange(2),
+            lip("l2", "f2")
+        ])));
+        assert!(unsupported(&plate(vec![
+            flange(1),
+            flange(2),
+            lip("l1", "f1"),
+            lip("l2", "f2")
+        ])));
+        // A remnant shorter than 2T next to a relief runs the notch on to
+        // the corner; not yet where a flange sits on the other edge there.
+        let tight = Flange {
+            width: Some(Width {
+                offset_start: 5.0,
+                offset_end: 20.0,
+            }),
+            ..flange(2)
+        };
+        assert!(!unsupported(&plate(vec![tight.clone()])));
+        assert!(unsupported(&plate(vec![flange(1), tight])));
+        // A relief notch reaching into the neighbouring flange's bend (that
+        // bend starts 9.7 from the corner: inside, 135 degrees).
+        let leaning = Flange {
+            angle: 135.0,
+            position: BendPosition::Inside,
+            ..flange(2)
+        };
+        let near_corner = |start: f64, end: f64, edge: usize| Flange {
+            width: Some(Width {
+                offset_start: start,
+                offset_end: end,
+            }),
+            ..flange(edge)
+        };
+        assert!(unsupported(&plate(vec![
+            near_corner(10.0, 7.0, 1),
+            leaning.clone()
+        ])));
+        assert!(!unsupported(&plate(vec![
+            near_corner(10.0, 15.0, 1),
+            leaning
+        ])));
+        // A notch running on to the corner across a flange on the other edge.
+        assert!(unsupported(&plate(vec![
+            near_corner(10.0, 1.0, 0),
+            near_corner(5.0, 10.0, 1)
+        ])));
+    }
+}

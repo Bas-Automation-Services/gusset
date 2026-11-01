@@ -1,0 +1,345 @@
+<title>Gusset Workbench</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a workbench. The part description on the left, the folded part and its flat blank on the right. */
+:root {
+  --bg: #e9ecee;
+  --panel: #f7f8f9;
+  --ink: #1b2127;
+  --muted: #59646e;
+  --line: #c7ced4;
+  --accent: #c2410c;
+  --down: #1d5fd1;
+  --steel: #a3adb6;
+  --edge: #2a3138;
+  --bad: #b42318;
+  --warn: #b7791f;
+  --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --body: "Barlow", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14181c; --panel: #1c2227; --ink: #e5e9ec; --muted: #94a1ab; --line: #303a42;
+    --accent: #fb7a2e; --down: #6aa5ff; --steel: #8d98a1; --edge: #0b0e10; --bad: #ff7b6e; --warn: #f0b429;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14181c; --panel: #1c2227; --ink: #e5e9ec; --muted: #94a1ab; --line: #303a42;
+  --accent: #fb7a2e; --down: #6aa5ff; --steel: #8d98a1; --edge: #0b0e10; --bad: #ff7b6e; --warn: #f0b429;
+  color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 32px;
+}
+.wrap { max-width: 1320px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; justify-content: space-between; }
+h1 { font: 600 2.4rem/1 var(--display); letter-spacing: 0.01em; margin: 0; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.lede { margin: 4px 0 0; color: var(--muted); max-width: 62ch; text-wrap: pretty; }
+label, .label { font: 600 0.72rem/1.2 var(--body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.pick { display: grid; gap: 4px; min-width: 0; }
+select, button {
+  font: 500 0.95rem var(--body); color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; max-width: 100%;
+}
+button { cursor: pointer; }
+button:hover, select:hover { border-color: var(--muted); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+main { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 960px) { main { grid-template-columns: minmax(0, 400px) minmax(0, 1fr); } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.editor { display: grid; grid-template-rows: auto 1fr auto; }
+.bar { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+textarea {
+  width: 100%; box-sizing: border-box; min-height: 340px; height: 100%; resize: vertical;
+  border: 0; background: transparent; color: var(--ink); padding: 12px;
+  font: 0.8rem/1.55 var(--mono); tab-size: 2;
+}
+textarea:focus-visible { outline-offset: -2px; }
+#status { padding: 8px 12px; border-top: 1px solid var(--line); font: 0.82rem/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+#status.bad { color: var(--bad); }
+.right { display: grid; gap: 16px; min-width: 0; align-content: start; }
+#view { position: relative; aspect-ratio: 16 / 10; max-width: 100%; overflow: hidden; }
+#view canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.tag { position: absolute; left: 12px; top: 10px; pointer-events: none; }
+.hint { position: absolute; right: 12px; bottom: 8px; font-size: 0.78rem; color: var(--muted); pointer-events: none; }
+.lower { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 720px) { .lower { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); } }
+.flat { padding: 10px 12px 12px; display: grid; gap: 8px; align-content: start; }
+#flat svg { width: 100%; height: auto; max-height: 340px; display: block; }
+#flat .cut { fill: color-mix(in srgb, var(--steel) 22%, transparent); stroke: var(--ink); stroke-width: 1.4; }
+#flat .hole { fill: var(--panel); stroke: var(--ink); stroke-width: 1.2; }
+#flat .bend { stroke-width: 1.2; }
+#flat .bend.up { stroke: var(--accent); stroke-dasharray: 6 4; }
+#flat .bend.down { stroke: var(--down); stroke-dasharray: 2 3; }
+#flat .clash { fill: var(--bad); fill-opacity: 0.8; stroke: var(--bad); stroke-width: 2.5; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }
+.legend i { display: inline-block; width: 18px; height: 0; border-top: 2px dashed var(--accent); vertical-align: middle; margin-right: 6px; }
+.legend i.dn { border-top: 2px dotted var(--down); }
+.data { padding: 10px 12px 12px; display: grid; gap: 12px; align-content: start; }
+dl { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+dt { font: 600 0.7rem/1.2 var(--body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+dd { margin: 2px 0 0; font: 500 1.35rem/1.15 var(--display); font-variant-numeric: tabular-nums; }
+dd small { font: 400 0.8rem var(--body); color: var(--muted); }
+.tablebox { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+th { text-align: left; font: 600 0.7rem/1.2 var(--body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 4px 6px; border-bottom: 1px solid var(--line); }
+td { padding: 4px 6px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); white-space: nowrap; }
+td.dir-up { color: var(--accent); }
+td.dir-down { color: var(--down); }
+.checks { display: grid; gap: 6px; }
+.checks ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 0.85rem; }
+.checks li { padding: 4px 8px; border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent); border-radius: 0 4px 4px 0; overflow-wrap: anywhere; }
+.checks p { margin: 0; font-size: 0.85rem; color: var(--muted); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+#copybox { width: 100%; box-sizing: border-box; height: 120px; min-height: 0; font: 0.72rem var(--mono); border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+footer { color: var(--muted); font-size: 0.85rem; max-width: 80ch; }
+footer a { color: var(--accent); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Gusset <span>Workbench</span></h1>
+      <p class="lede">An open sheet metal kernel, running in this page as WebAssembly. Describe a part as JSON and Gusset folds it, unfolds it and measures it as you type.</p>
+    </div>
+    <div class="pick">
+      <label for="example">Example part</label>
+      <select id="example"></select>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel editor" aria-label="Part description">
+      <div class="bar"><span class="label">Part description · JSON, mm</span><button id="reset" type="button">Reset example</button></div>
+      <textarea id="spec" spellcheck="false" aria-label="Part description as JSON"></textarea>
+      <div id="status" role="status">Loading the kernel…</div>
+    </section>
+
+    <div class="right">
+      <section class="panel" id="view" aria-label="Folded part">
+        <span class="label tag">Folded</span>
+        <span class="hint">Drag to turn · scroll to zoom</span>
+      </section>
+      <div class="lower">
+        <section class="panel flat" aria-label="Flat pattern">
+          <span class="label">Flat pattern</span>
+          <div id="flat"></div>
+          <div class="legend"><span><i></i>bend up</span><span><i class="dn"></i>bend down</span></div>
+        </section>
+        <section class="panel data" aria-label="Measurements">
+          <dl>
+            <div><dt>Blank</dt><dd id="blank">–</dd></div>
+            <div><dt>Mass in steel</dt><dd id="mass">–</dd></div>
+            <div><dt>Volume</dt><dd id="volume">–</dd></div>
+            <div><dt>Surface</dt><dd id="area">–</dd></div>
+          </dl>
+          <div class="tablebox">
+            <table>
+              <thead><tr><th>Bend</th><th>Angle</th><th>Inner R</th><th>K</th><th>Length</th><th>Dir</th></tr></thead>
+              <tbody id="bends"></tbody>
+            </table>
+          </div>
+          <div class="checks">
+            <span class="label">Shop checks</span>
+            <ul id="findings"></ul>
+            <p id="clean" hidden>Passes the default rules: inner radius at least T, legs at least 3T past a bend, holes at least 2T from a bend, T from the edge and T across.</p>
+          </div>
+          <div class="actions">
+            <button id="copy-dxf" type="button">Copy flat DXF</button>
+            <button id="copy-step" type="button">Copy STEP</button>
+          </div>
+          <textarea id="copybox" hidden readonly aria-label="Exported file"></textarea>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    Every example is a part from the Gusset test suite. Steel mass at 7.85 g/cm³.
+    Source: <a href="https://github.com/Bas-Automation-Services/gusset">github.com/Bas-Automation-Services/gusset</a> (MPL-2.0).
+  </footer>
+</div>
+
+<script type="application/json" id="examples">[{"label":"Rounded tray","spec":{"id":"tray-rounded","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[10.0,0.0],[90.0,0.0],[100.0,10.0],[100.0,50.0],[90.0,60.0],[10.0,60.0],[0.0,50.0],[0.0,10.0]],"bulges":[0.0,0.41421356237309503,0.0,0.41421356237309503,0.0,0.41421356237309503,0.0,0.41421356237309503],"holes":[]},"flanges":[{"id":"f0","on":{"base":0},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f2","on":{"base":2},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f4","on":{"base":4},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f6","on":{"base":6},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"}]}},{"label":"Box, overlapping corners","spec":{"id":"tray-overlap","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"relief":{"width":2.0,"depth":1.0,"minimum_remnant":4.0,"seam":"overlap"},"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[]},"flanges":[{"id":"f0","on":{"base":0},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f1","on":{"base":1},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f2","on":{"base":2},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f3","on":{"base":3},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"}]}},{"label":"Channel with closed ends","spec":{"id":"profile-channel-ends","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"profile":{"points":[[0.0,40.0],[0.0,0.0],[60.0,0.0],[60.0,40.0]],"material":"left","width":100.0},"holes":[]},"flanges":[{"id":"e1","on":{"base":1},"angle":90.0,"length":25.0,"datum":"outer","position":"outside","side":"up"},{"id":"e3","on":{"base":3},"angle":90.0,"length":25.0,"datum":"outer","position":"outside","side":"up"}]}},{"label":"Hemmed channel","spec":{"id":"profile-hems","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"profile":{"points":[[0.0,40.0],[0.0,0.0],[60.0,0.0],[60.0,40.0]],"material":"left","width":100.0},"holes":[]},"flanges":[],"hems":[{"id":"h1","on":{"tip":"end"},"kind":{"single":{"gap":1.0,"length":8.0}},"side":"down"},{"id":"h2","on":{"tip":"start"},"kind":{"single":{"gap":1.0,"length":8.0}},"side":"up"}]}},{"label":"Hat section","spec":{"id":"profile-hat","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"profile":{"points":[[0.0,0.0],[20.0,0.0],[20.0,30.0],[60.0,30.0],[60.0,0.0],[80.0,0.0]],"material":"left","width":100.0},"holes":[]},"flanges":[]}},{"label":"Z-flange between two flanges","spec":{"id":"corner-contour-both","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[]},"flanges":[{"id":"f1","on":{"base":1},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f3","on":{"base":3},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"}],"contours":[{"id":"c","on":{"base":2},"profile":[[0.0,2.0],[0.0,22.0],[20.0,22.0],[20.0,42.0]],"face":"bottom"}]}},{"label":"Folded blank with holes","spec":{"id":"fold-u-channel","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[{"center":[30.0,30.0],"diameter":6.0},{"center":[70.0,30.0],"diameter":6.0}]},"flanges":[],"folds":[{"id":"f1","line":[[0.0,15.0],[100.0,15.0]],"angle":90.0,"location":"centerline","side":"up"},{"id":"f2","line":[[100.0,45.0],[0.0,45.0]],"angle":90.0,"location":"centerline","side":"up"}]}},{"label":"Partial flange, round tips","spec":{"id":"tip-round-partial","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[]},"flanges":[{"id":"f","on":{"base":2},"width":{"offset_start":20.0,"offset_end":30.0},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up","tip_corners":{"round":{"radius":8.0}}}]}},{"label":"Contour on a flange's tip","spec":{"id":"contour-on-flange","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[]},"flanges":[{"id":"f","on":{"base":2},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"}],"contours":[{"id":"c","on":{"tip":"f"},"profile":[[0.0,0.0],[0.0,15.0],[10.0,15.0]],"face":"bottom"}]}},{"label":"Tray unfolded by a bend table","spec":{"id":"table-tray","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"bend_table":{"radii":[0.5,1.0,2.0,3.0,4.0,6.0],"angles":[0.0,5.0,10.0,15.0,20.0,25.0,30.0,35.0,40.0,45.0,50.0,55.0,60.0,65.0,70.0,75.0,80.0,85.0,90.0,95.0,100.0,105.0,110.0,115.0,120.0,125.0,130.0,135.0,140.0,145.0,150.0,155.0,160.0,165.0,170.0,175.0,180.0],"values":[[2.332882,1.289229,-0.325221,-1.743417,-3.081263,-5.641051],[2.406969,1.420084,-0.093964,-1.417211,-2.662339,-5.039911],[2.481055,1.550938,0.137292,-1.091005,-2.243415,-4.438771],[2.555142,1.681793,0.368548,-0.764799,-1.824491,-3.837631],[2.629229,1.812648,0.599804,-0.438593,-1.405567,-3.23649],[2.703315,1.943503,0.83106,-0.112387,-0.986643,-2.63535],[2.777402,2.074357,1.062316,0.213819,-0.567719,-2.03421],[2.851488,2.205212,1.293572,0.540025,-0.148795,-1.433069],[2.925575,2.336067,1.524828,0.866231,0.270129,-0.831929],[2.999662,2.466922,1.756085,1.192437,0.689053,-0.230789],[3.073748,2.597776,1.987341,1.518644,1.107977,0.370352],[3.147835,2.728631,2.218597,1.84485,1.526901,0.971492],[3.221921,2.859486,2.449853,2.171056,1.945825,1.572632],[3.296008,2.990341,2.681109,2.497262,2.364749,2.173773],[3.370095,3.121195,2.912365,2.823468,2.783673,2.774913],[3.444181,3.25205,3.143621,3.149674,3.202597,3.376053],[3.518268,3.382905,3.374877,3.47588,3.621521,3.977194],[3.592354,3.51376,3.606134,3.802086,4.040445,4.578334],[3.666441,3.644614,3.83739,4.128292,4.459369,5.179474],[3.322184,3.273456,3.399295,3.617809,3.874267,4.441913],[3.010112,2.940922,3.012699,3.1717,3.366412,3.807349],[2.725336,2.641141,2.669774,2.78018,2.924064,3.260127],[2.463825,2.369279,2.364075,2.435191,2.537555,2.787356],[2.222225,2.12131,2.090232,2.130024,2.198832,2.3783],[1.997712,1.893845,1.843729,1.85903,1.901116,2.02392],[1.787883,1.684,1.620719,1.617404,1.638641,1.716529],[1.590672,1.489298,1.4179,1.401016,1.406452,1.449519],[1.404288,1.307589,1.232403,1.206281,1.200247,1.217154],[1.227158,1.136983,1.061713,1.030054,1.016251,1.014401],[1.057888,0.975809,0.903597,0.869546,0.851118,0.836798],[0.895226,0.822567,0.756057,0.722256,0.701847,0.680345],[0.73804,0.675894,0.617277,0.585917,0.565716,0.541413],[0.585288,0.534543,0.485591,0.458446,0.440228,0.41667],[0.436003,0.397351,0.359452,0.337907,0.323058,0.303019],[0.28927,0.263222,0.237397,0.222475,0.212016,0.197538],[0.144218,0.131111,0.118031,0.110403,0.105007,0.097435],[0.0,0.0,0.0,0.0,0.0,0.0]]},"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[]},"flanges":[{"id":"f0","on":{"base":0},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f1","on":{"base":1},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f2","on":{"base":2},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"},{"id":"f3","on":{"base":3},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up","k_factor":0.3}]}},{"label":"Partial double hem","spec":{"id":"hem-partial-double","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[]},"flanges":[],"hems":[{"id":"h","on":{"base":2},"width":{"offset_start":20.0,"offset_end":30.0},"kind":{"double":{"gap":1.0,"length":10.0}},"side":"up"}]}},{"label":"Holes across the edges","spec":{"id":"hole-edge-flange","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[{"center":[0.0,30.0],"diameter":10.0},{"center":[100.0,75.0],"diameter":8.0},{"center":[50.0,88.3982297150257],"diameter":8.0}]},"flanges":[{"id":"f","on":{"base":2},"angle":90.0,"length":30.0,"datum":"outer","position":"outside","side":"up"}]}},{"label":"J-hook","spec":{"id":"contour-hook","thickness":2.0,"bend_radius":2.0,"k_factor":0.4,"base":{"outline":[[0.0,0.0],[100.0,0.0],[100.0,60.0],[0.0,60.0]],"holes":[]},"flanges":[],"contours":[{"id":"c","on":{"base":2},"profile":[[0.0,2.0],[0.0,30.0],[-20.0,30.0],[-20.0,15.0]],"bulges":[0.0,1.0,0.0],"face":"bottom"}]}}]</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script type="module">
+import init, * as gusset from "./pkg/gusset_wasm.js";
+
+const $ = (id) => document.getElementById(id);
+const examples = JSON.parse($("examples").textContent);
+const editor = $("spec"), status = $("status");
+for (const [i, ex] of examples.entries()) $("example").add(new Option(ex.label, i));
+
+// Three.js view, z up like the part's own frame.
+const view = $("view");
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+view.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, 1.6, 1, 20000);
+camera.up.set(0, 0, 1);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 0.85));
+const sun = new THREE.DirectionalLight(0xffffff, 0.75);
+sun.position.set(1, -2, 3);
+scene.add(sun);
+const material = new THREE.MeshStandardMaterial({ metalness: 0.35, roughness: 0.5, side: THREE.DoubleSide });
+const edgeMaterial = new THREE.LineBasicMaterial();
+// A part that folds into itself: the sheet see-through, the clash solid.
+const ghost = new THREE.MeshStandardMaterial({ metalness: 0.2, roughness: 0.6, side: THREE.DoubleSide, transparent: true, opacity: 0.35, depthWrite: false });
+const clashMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4 });
+let part = null;
+
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function recolor() {
+  material.color.set(css("--steel"));
+  ghost.color.set(css("--steel"));
+  edgeMaterial.color.set(css("--edge"));
+  clashMaterial.color.set(css("--bad"));
+}
+recolor();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", recolor);
+new MutationObserver(recolor).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+function resize() {
+  const { width, height } = view.getBoundingClientRect();
+  renderer.setSize(width, height, false);
+  camera.aspect = width / Math.max(height, 1);
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(view);
+(function loop() { controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); })();
+
+function geometryOf(mesh) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(mesh.positions, 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(mesh.normals, 3));
+  geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
+  return geometry;
+}
+
+// `clash`: a preview of a part that folds into itself, with the clash on top.
+function show(mesh, refit, clash) {
+  const geometry = geometryOf(mesh);
+  if (part) { scene.remove(part); part.traverse((o) => o.geometry && o.geometry.dispose()); }
+  part = new THREE.Group();
+  if (clash) {
+    part.add(new THREE.Mesh(geometry, ghost));
+    part.add(new THREE.Mesh(geometryOf(clash), clashMaterial));
+  } else {
+    part.add(new THREE.Mesh(geometry, material));
+    part.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 25), edgeMaterial));
+  }
+  scene.add(part);
+  if (!refit) return;
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox, centre = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3()).length();
+  controls.target.copy(centre);
+  camera.position.copy(centre).add(new THREE.Vector3(0.9, -1.5, 1.05).normalize().multiplyScalar(size * 1.55));
+  camera.near = size / 100; camera.far = size * 20; camera.updateProjectionMatrix();
+}
+
+const fmt = (x, d = 1) => x.toLocaleString("en-GB", { minimumFractionDigits: d, maximumFractionDigits: d });
+const plain = (s) => String(s).replace(/[<>&"]/g, "");
+function run(refit) {
+  const json = editor.value;
+  try {
+    JSON.parse(json);
+  } catch (e) {
+    status.className = "bad";
+    status.textContent = "Not valid JSON: " + e.message;
+    return;
+  }
+  try {
+    const t0 = performance.now();
+    const mesh = gusset.mesh(json, 0.05);
+    const m = JSON.parse(gusset.mass(json));
+    showFlat(json);
+    show(mesh, refit);
+    $("mass").innerHTML = `${fmt(m.volume * 7.85e-6, 3)} <small>kg</small>`;
+    $("volume").innerHTML = `${fmt(m.volume / 1000, 2)} <small>cm³</small>`;
+    $("area").innerHTML = `${fmt(m.area / 100, 1)} <small>cm²</small>`;
+    const findings = JSON.parse(gusset.check(json, ""));
+    $("findings").innerHTML = findings.map((x) => `<li>${plain(x.message)}</li>`).join("");
+    $("clean").hidden = findings.length > 0;
+    status.className = "";
+    status.textContent = `Folded, unfolded and measured in ${fmt(performance.now() - t0, 0)} ms · ${fmt(mesh.indices.length / 3, 0)} triangles`;
+  } catch (e) {
+    status.className = "bad";
+    status.textContent = String(e.message || e);
+    showClash(json, refit);
+  }
+}
+
+function showFlat(json) {
+  const f = JSON.parse(gusset.flat(json));
+  $("flat").innerHTML = gusset.flatSvg(json);
+  $("blank").innerHTML = `${fmt(f.width)} × ${fmt(f.height)} <small>mm</small>`;
+  $("bends").innerHTML = f.bends.map((b) =>
+    `<tr><td>${plain(b.feature)}</td><td>${fmt(b.angle)}°</td><td>${fmt(b.inner_radius)}</td><td>${fmt(b.k_factor, 2)}</td><td>${fmt(b.length)}</td><td class="dir-${b.up ? "up" : "down"}">${b.up ? "up" : "down"}</td></tr>`
+  ).join("") || `<tr><td colspan="6">No bends</td></tr>`;
+}
+
+// Where a refused part folds into itself: red on the flat and in 3D.
+function showClash(json, refit) {
+  let found = [];
+  try { found = JSON.parse(gusset.clashes(json)); } catch { return; }
+  if (!found.length) return;
+  const p = gusset.preview(json);
+  show(p.sheet, refit, p.clash);
+  showFlat(json);
+  for (const id of ["mass", "volume", "area"]) $(id).textContent = "–";
+  $("findings").innerHTML = "";
+  $("clean").hidden = true;
+  const more = found.length > 1 ? ` (and ${found.length - 1} more pair${found.length > 2 ? "s" : ""})` : "";
+  status.textContent = `Folds into itself, shown in red: ${found[0].message}${more}`;
+}
+
+function load(i) {
+  editor.value = JSON.stringify(examples[i].spec, null, 2);
+  run(true);
+}
+$("example").addEventListener("change", (e) => load(+e.target.value));
+$("reset").addEventListener("click", () => load(+$("example").value));
+let timer;
+editor.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => run(false), 300); });
+
+function copier(button, make, name) {
+  const label = button.textContent;
+  button.addEventListener("click", () => {
+    let text;
+    try { text = make(editor.value); } catch (e) { status.className = "bad"; status.textContent = String(e.message || e); return; }
+    const box = $("copybox");
+    const fallback = () => { box.hidden = false; box.value = text; box.select(); button.textContent = `Select all and copy the ${name}`; };
+    if (!navigator.clipboard) return fallback();
+    navigator.clipboard.writeText(text).then(() => {
+      box.hidden = true;
+      button.textContent = `Copied the ${name} (${fmt(text.length / 1024, 0)} kB)`;
+      setTimeout(() => (button.textContent = label), 2000);
+    }, fallback);
+  });
+}
+copier($("copy-dxf"), gusset.flatDxf, "DXF");
+copier($("copy-step"), gusset.step, "STEP");
+
+try {
+  await init();
+  load(0);
+} catch (e) {
+  status.className = "bad";
+  status.textContent = "The kernel could not start in this browser: " + (e.message || e);
+}
+</script>

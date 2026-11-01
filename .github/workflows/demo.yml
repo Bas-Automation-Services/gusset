@@ -1,0 +1,54 @@
+# Builds the kernel as WebAssembly and publishes demo/ to GitHub Pages.
+name: Demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+      - run: cargo test --release --workspace
+      - run: wasm-pack build crates/gusset-wasm --target web --release --out-dir ../../demo/pkg
+      # The page is written as a fragment; give it a document head of its own.
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          {
+            echo '<!doctype html>'
+            echo '<html lang="en"><head><meta charset="utf-8">'
+            echo '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            cat demo/index.html
+          } > _site/index.html
+          mkdir -p _site/pkg
+          cp demo/pkg/*.js demo/pkg/*.wasm _site/pkg/
+      - uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

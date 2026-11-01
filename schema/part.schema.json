@@ -1,0 +1,1032 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PartSpec",
+  "type": "object",
+  "properties": {
+    "base": {
+      "$ref": "#/$defs/Base"
+    },
+    "bend_radius": {
+      "description": "Inner bend radius, used by every bend.",
+      "type": "number",
+      "format": "double"
+    },
+    "bend_table": {
+      "description": "Bend compensation from a table instead, for every bend without a\n`k_factor` of its own.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BendTable"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "contours": {
+      "description": "Contour flanges, built after the flanges.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Contour"
+      }
+    },
+    "flanges": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Flange"
+      }
+    },
+    "folds": {
+      "description": "Bends along a line across the base.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FoldLine"
+      }
+    },
+    "hems": {
+      "description": "Hems, built after the flanges (so a hem can sit on a flange's tip).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Hem"
+      }
+    },
+    "id": {
+      "type": "string"
+    },
+    "jogs": {
+      "description": "Z-steps across the base: two folds each.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Jog"
+      }
+    },
+    "k_factor": {
+      "description": "Linear unfold: neutral layer at `k_factor * thickness` from the inside.",
+      "type": "number",
+      "format": "double"
+    },
+    "relief": {
+      "description": "Bend reliefs for flanges narrower than their edge. Default: width T,\ndepth T/2, minimum remnant 2T.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Relief"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "thickness": {
+      "type": "number",
+      "format": "double"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "thickness",
+    "bend_radius",
+    "k_factor",
+    "base"
+  ],
+  "$defs": {
+    "Base": {
+      "type": "object",
+      "properties": {
+        "bulges": {
+          "description": "Per outline edge: 0 for a line, otherwise tan(sweep / 4) of an arc (as\na DXF bulge; positive turns counter-clockwise). No feature sits on an\narc edge. A flange running into a tangent arc (a rounded corner) gets\na straight relief whose notch runs on to the arc. All lines when empty.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "cutouts": {
+          "description": "Cut-outs in the flat pattern, like holes but any shape.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Cutout"
+          }
+        },
+        "holes": {
+          "description": "Holes in the flat pattern (the base frame, which the flat pattern\nshares): on the base, across or inside a bend, or on a flange. Each\nmust lie inside the flat outline or cross it (a round notch), without\ntouching it, and clear of the others.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Hole"
+          }
+        },
+        "outline": {
+          "description": "Counter-clockwise polygon seen from +z. Edge `i` runs from\n`outline[i]` to `outline[i + 1]` (wrapping). Empty for a profile.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "profile": {
+          "description": "In place of an outline: the part is a profile run along a width.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Profile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "BaseFace": {
+      "type": "string",
+      "enum": [
+        "top",
+        "bottom"
+      ]
+    },
+    "BendLocation": {
+      "description": "Where the bend sits relative to a fold line.",
+      "oneOf": [
+        {
+          "description": "The line is the middle of the bend.",
+          "type": "string",
+          "const": "centerline"
+        },
+        {
+          "description": "The bend starts at the line (on the turning side).",
+          "type": "string",
+          "const": "start"
+        },
+        {
+          "description": "The bend ends at the line.",
+          "type": "string",
+          "const": "end"
+        }
+      ]
+    },
+    "BendPosition": {
+      "description": "Where the bend sits relative to the base edge.",
+      "oneOf": [
+        {
+          "description": "The flange's outer face stays within the base outline.",
+          "type": "string",
+          "const": "inside"
+        },
+        {
+          "description": "The flange's inner face is flush with the base edge.",
+          "type": "string",
+          "const": "outside"
+        }
+      ]
+    },
+    "BendTable": {
+      "description": "Bend compensation by table (DIN 6935): a bend\nunfolds to A + B - x, where A and B are the two legs measured to the bend's\noutside (to the outer faces' virtual sharp for an opening angle of 90\ndegrees or more, else to the outer face's tangent square to the other leg).\nOne table, for the part's thickness; x is interpolated linearly between\nrows and columns, and a value within 0.004 of the table's range counts as\nits end.",
+      "type": "object",
+      "properties": {
+        "angles": {
+          "description": "Opening angles (180 minus the bend angle), ascending, degrees.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "radii": {
+          "description": "Inner bend radii, ascending.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "values": {
+          "description": "x per opening angle (a row each), per radius.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "radii",
+        "angles",
+        "values"
+      ]
+    },
+    "Contour": {
+      "description": "A profile run along a base edge (a contour flange):\nevery corner of the profile becomes a bend of the part's radius.",
+      "type": "object",
+      "properties": {
+        "bend_radius": {
+          "description": "Inner bend radius for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "bulges": {
+          "description": "Per segment: 0 for a line, otherwise tan(sweep / 4) of an arc (as a\nDXF bulge; positive turns counter-clockwise, seen with s right and z\nup). An arc must be tangent to its neighbours; it is a bend whose face\non the profile is the arc. All lines when empty.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "face": {
+          "description": "The base face the profile continues. The profile is that face of the\ncontour flange; the material lies on the base's side of it.",
+          "$ref": "#/$defs/BaseFace"
+        },
+        "id": {
+          "type": "string"
+        },
+        "k_factor": {
+          "description": "K-factor for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "on": {
+          "description": "A base edge, or a flange's tip. On a tip the section frame is the\nparent's: s continues along the parent, z runs from the parent's outer\nface (outside its last bend: \"bottom\") toward its inner face (\"top\").",
+          "$ref": "#/$defs/EdgeRef"
+        },
+        "profile": {
+          "description": "An open polyline in the edge's section: s outward from the edge (along\nits outward normal), z up from the base's bottom face. Its first line\nleaves the base face it continues; where that line meets the face, the\nfirst bend's corner is. The start point may be anywhere on the line.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "width": {
+          "description": "Partial width on a base edge, with bend reliefs as for a flange; the\nfull edge when absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Width"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "on",
+        "profile",
+        "face"
+      ]
+    },
+    "CornerCut": {
+      "description": "A cut across a sheet corner.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "round": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "radius"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "round"
+          ]
+        },
+        {
+          "description": "The same distance back along both edges.",
+          "type": "object",
+          "properties": {
+            "chamfer": {
+              "type": "object",
+              "properties": {
+                "distance": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "distance"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "chamfer"
+          ]
+        }
+      ]
+    },
+    "CornerRelief": {
+      "description": "The relief at a corner where two flanges meet.",
+      "type": "object",
+      "properties": {
+        "shape": {
+          "$ref": "#/$defs/CornerShape"
+        },
+        "size": {
+          "description": "Diameter (round) or side (square). Default 4T. Larger than the\ndiagonal of where the bends overlap, centred where the bend centre\nlines cross. Smaller, on the bisector through q (where the bend start\nlines cross): its inscribed circle through q, until its corner reaches\nthe circle through q and both flanges' first corners, then at that\ncircle's centre; until then it is cut from the flat\npattern only (folded, the corner is trimmed to bend).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "shape"
+      ]
+    },
+    "CornerShape": {
+      "oneOf": [
+        {
+          "description": "Each bend runs to the other's bend start; the flanges stop the miter\ngap apart.",
+          "type": "string",
+          "const": "trim_to_bend"
+        },
+        {
+          "description": "Trim to bend, minus a disc.",
+          "type": "string",
+          "const": "round"
+        },
+        {
+          "description": "Trim to bend, minus a square: its diagonal on the bisector of the two\nedge normals (along the edges at a square corner).",
+          "type": "string",
+          "const": "square"
+        },
+        {
+          "description": "Each bend ends in a straight cut from where both bends start to the\ncorner of its flange; the flat shows that cut (a weld preparation).",
+          "type": "string",
+          "const": "linear_weld"
+        },
+        {
+          "description": "As the linear weld in 3D; the flat shows the corner closed, its flange\nedges meeting (torn when folded).",
+          "type": "string",
+          "const": "tear"
+        }
+      ]
+    },
+    "Cutout": {
+      "description": "A cut-out: a closed profile of lines and arcs, counter-clockwise seen\nfrom +z, cut through the flat sheet. Segment `k` runs from `outline[k]`\nto `outline[k + 1]` (wrapping).",
+      "type": "object",
+      "properties": {
+        "bulges": {
+          "description": "Per segment: 0 for a line, otherwise tan(sweep / 4) of an arc (as a\nDXF bulge; positive turns counter-clockwise). All lines when empty.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "outline": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "outline"
+      ]
+    },
+    "EdgeRef": {
+      "description": "The edge a flange is built on.",
+      "oneOf": [
+        {
+          "description": "Base outline edge `i`.",
+          "type": "object",
+          "properties": {
+            "base": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "base"
+          ]
+        },
+        {
+          "description": "The free end of the flange with this id (defined earlier in the list),\nof a contour flange (its profile's end), or of a profile part: \"start\"\nor \"end\".",
+          "type": "object",
+          "properties": {
+            "tip": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "tip"
+          ]
+        }
+      ]
+    },
+    "Flange": {
+      "description": "A straight flange along the edge it is built on: the full length, or a\npart of it on a base edge. For a flange on a flange, \"base\" in the datum\nand position docs means the parent flange.",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "description": "Bend angle: how far the flange turns away from the base plane.\n0 continues the base, 90 is perpendicular, 135 leans back over the base.",
+          "type": "number",
+          "format": "double"
+        },
+        "bend_radius": {
+          "description": "Inner bend radius for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "datum": {
+          "$ref": "#/$defs/HeightDatum"
+        },
+        "id": {
+          "type": "string"
+        },
+        "k_factor": {
+          "description": "K-factor for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "length": {
+          "description": "Flange height, measured as `datum` says.",
+          "type": "number",
+          "format": "double"
+        },
+        "on": {
+          "$ref": "#/$defs/EdgeRef"
+        },
+        "position": {
+          "$ref": "#/$defs/BendPosition"
+        },
+        "side": {
+          "$ref": "#/$defs/Side"
+        },
+        "tip_corners": {
+          "description": "Both corners of its free tip rounded or chamfered, where the flange's ends are square to it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CornerCut"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "width": {
+          "description": "Partial width on a base edge; the full edge when absent. A flange on\na tip always spans its parent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Width"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "on",
+        "angle",
+        "length",
+        "datum",
+        "position",
+        "side"
+      ]
+    },
+    "FoldLine": {
+      "description": "A bend along a straight line across the base: the part to the right of\n`line[0] -> line[1]` (seen from +z) turns, the rest stays. Uses the part's\nbend radius.",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "type": "number",
+          "format": "double"
+        },
+        "bend_radius": {
+          "description": "Inner bend radius for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "id": {
+          "type": "string"
+        },
+        "k_factor": {
+          "description": "K-factor for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "line": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "location": {
+          "$ref": "#/$defs/BendLocation"
+        },
+        "side": {
+          "$ref": "#/$defs/Side"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "line",
+        "angle",
+        "location",
+        "side"
+      ]
+    },
+    "Hand": {
+      "type": "string",
+      "enum": [
+        "left",
+        "right"
+      ]
+    },
+    "HeightDatum": {
+      "description": "Where the flange height is measured from.",
+      "oneOf": [
+        {
+          "description": "From the outside of the base, along the flange.",
+          "type": "string",
+          "const": "outer"
+        },
+        {
+          "description": "From the inside of the base, along the flange.",
+          "type": "string",
+          "const": "inner"
+        },
+        {
+          "description": "From the tangent at the end of the bend, along the flange.",
+          "type": "string",
+          "const": "tangent"
+        },
+        {
+          "description": "From the outside of the base, perpendicular to the base.",
+          "type": "string",
+          "const": "outer_ortho"
+        },
+        {
+          "description": "From the inside of the base, perpendicular to the base.",
+          "type": "string",
+          "const": "inner_ortho"
+        }
+      ]
+    },
+    "Hem": {
+      "description": "An edge folded back over itself.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "k_factor": {
+          "description": "K-factor for its bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "kind": {
+          "$ref": "#/$defs/HemKind"
+        },
+        "on": {
+          "$ref": "#/$defs/EdgeRef"
+        },
+        "side": {
+          "description": "The side it folds over: as for flanges.",
+          "$ref": "#/$defs/Side"
+        },
+        "width": {
+          "description": "Partial width on a base edge, with bend reliefs as for a flange; the\nfull edge when absent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Width"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "on",
+        "kind",
+        "side"
+      ]
+    },
+    "HemKind": {
+      "oneOf": [
+        {
+          "description": "One 180-degree fold: inner radius gap/2, `length` from the edge to the end.",
+          "type": "object",
+          "properties": {
+            "single": {
+              "type": "object",
+              "properties": {
+                "gap": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "length": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "gap",
+                "length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "single"
+          ]
+        },
+        {
+          "description": "Folded twice into three layers with `gap` between them; `length` from\nthe edge to the far fold.",
+          "type": "object",
+          "properties": {
+            "double": {
+              "type": "object",
+              "properties": {
+                "gap": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "length": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "gap",
+                "length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "double"
+          ]
+        },
+        {
+          "description": "One bend of `angle` (180..360) around `radius`, closed by a straight\ntail that ends T/4 above the sheet.",
+          "type": "object",
+          "properties": {
+            "teardrop": {
+              "type": "object",
+              "properties": {
+                "angle": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "radius": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "radius",
+                "angle"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "teardrop"
+          ]
+        },
+        {
+          "description": "One bend of `angle` around `radius`, no tail.",
+          "type": "object",
+          "properties": {
+            "rolled": {
+              "type": "object",
+              "properties": {
+                "angle": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "radius": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "radius",
+                "angle"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rolled"
+          ]
+        }
+      ]
+    },
+    "Hole": {
+      "description": "A circular hole, cut through the flat sheet.",
+      "type": "object",
+      "properties": {
+        "center": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "diameter": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "center",
+        "diameter"
+      ]
+    },
+    "Jog": {
+      "description": "A Z-step: the part to the right of `line[0] -> line[1]` (seen from +z)\nsteps up or down by `offset` and runs on parallel. Two folds of `angle`:\nthe first starts at the line, the second turns back after a straight\nrun, so that the faces move by `offset` (bottom faces for up, top faces\nfor down: (2R + T)(1 - cos angle) + run sin angle).",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "description": "Default 90.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "id": {
+          "type": "string"
+        },
+        "line": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "offset": {
+          "type": "number",
+          "format": "double"
+        },
+        "side": {
+          "$ref": "#/$defs/Side"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "line",
+        "offset",
+        "side"
+      ]
+    },
+    "Profile": {
+      "description": "A part made from a profile run along a width (a contour flange as the\nfirst feature). The profile is one face of the sheet; every\nsharp corner is a bend of the part's radius and a tangent arc a bend with\nthe arc's radius, as for a contour flange on an edge. Its first straight\nline on z = 0 with the material above it, or on z = T with the material\nbelow it, is the base plate (z = 0..T): the flat pattern, holes and\ncut-outs use the base's frame, as for an outline. Flanges and hems may sit\non its free ends, `{\"tip\": \"start\"}` and `{\"tip\": \"end\"}` (`up` turns as\nthe profile's last bend before that end; an end without a bend is the base\nplate's edge there), on each other's tips, and on the\nbase plate's edges: 0 at y = lo, 1 at x = width, 2 at y = hi, 3 at x = 0\n(the profile is built first: those meet its bends by build order).\nContour flanges and folds go on it as on an outline.",
+      "type": "object",
+      "properties": {
+        "bulges": {
+          "description": "Per segment: 0 for a line, otherwise tan(sweep / 4) of an arc (as a\nDXF bulge; positive turns counter-clockwise, seen with y right and z\nup). All lines when empty.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "material": {
+          "description": "The side of the profile the material lies on, going along the points\nseen with y right and z up.",
+          "$ref": "#/$defs/Hand"
+        },
+        "points": {
+          "description": "An open polyline in the YZ plane: [y, z].",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "width": {
+          "description": "Run along +x from x = 0.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "points",
+        "material",
+        "width"
+      ]
+    },
+    "Relief": {
+      "description": "A bend relief: a notch next to each end of a partial flange, outside its\nwidth.",
+      "type": "object",
+      "properties": {
+        "corner": {
+          "description": "How a corner where two flanges meet is relieved. Default: trim to bend.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CornerRelief"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "depth": {
+          "description": "How far the notch reaches past the start of the bend, into the base.",
+          "type": "number",
+          "format": "double"
+        },
+        "minimum_remnant": {
+          "description": "Base edge left between a notch and the corner must be at least this\nlong; Gusset doesn't build shorter remnants yet.",
+          "type": "number",
+          "format": "double"
+        },
+        "miter_gap": {
+          "description": "Where two flanges meet at a corner: the gap between their inner\ncorners. Default T.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "seam": {
+          "description": "How two flanges meeting at a corner close it.\nDefault: mitered.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Seam"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shape": {
+          "description": "Straight (rectangular) by default.",
+          "$ref": "#/$defs/ReliefShape"
+        },
+        "width": {
+          "description": "Notch width along the edge.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "depth",
+        "minimum_remnant"
+      ]
+    },
+    "ReliefShape": {
+      "description": "The notch's end, past the start of the bend.",
+      "oneOf": [
+        {
+          "description": "Square end at `depth` past the bend start.",
+          "type": "string",
+          "const": "straight"
+        },
+        {
+          "description": "Semicircular end of diameter `width`, reaching `depth` past the bend\nstart (so `depth` must be at least `width / 2`).",
+          "type": "string",
+          "const": "round"
+        },
+        {
+          "description": "Torn, not cut: a 0.01 x 0.01 mm notch in 3D (whatever `width` and\n`depth` say), none in the flat.",
+          "type": "string",
+          "const": "tear"
+        }
+      ]
+    },
+    "Seam": {
+      "description": "How two flanges meeting at a corner close it.",
+      "oneOf": [
+        {
+          "description": "Each flange stops half the miter gap from the corner's symmetry plane.",
+          "type": "string",
+          "const": "miter"
+        },
+        {
+          "description": "The flange on the edge that ends at the corner (in outline order) runs\non over the other's end; the other stops the miter gap short of it.",
+          "type": "string",
+          "const": "overlap"
+        },
+        {
+          "description": "The flange on the edge that starts at the corner runs on over the\nother's end.",
+          "type": "string",
+          "const": "reverse_overlap"
+        }
+      ]
+    },
+    "Side": {
+      "description": "Which way the flange bends. On a base edge: `Up` toward +z. On a tip:\n`Up` turns the same way as the parent flange (a return lip, C-profile),\n`Down` the opposite way (a Z-step).",
+      "type": "string",
+      "enum": [
+        "up",
+        "down"
+      ]
+    },
+    "Width": {
+      "description": "Where a partial flange sits on its base edge `a -> b`.",
+      "type": "object",
+      "properties": {
+        "offset_end": {
+          "description": "Gap between the flange and `b` (outline[i + 1]).",
+          "type": "number",
+          "format": "double"
+        },
+        "offset_start": {
+          "description": "Gap between `a` (outline[i]) and the flange.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "offset_start",
+        "offset_end"
+      ]
+    }
+  }
+}
