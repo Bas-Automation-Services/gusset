@@ -851,11 +851,35 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     _ => false,
                 };
             // A lip on one of the two flanges continues its flange's corner
-            // edge; lips on
-            // both would meet too, and don't unfold.
+            // edge. Flanges alike with lips alike on both (one feature on
+            // two edges, as for one flange) are mitered at the corner like a
+            // contour along both edges; other lips on both don't unfold.
             let lips = has_lip(k) || has_lip(m);
-            if has_lip(k) && has_lip(m) && !(contour(k) && contour(m)) {
-                return unsupported("lips or hems on both flanges at a corner");
+            let alike = same && !contour(k) && !contour(m) && has_lip(k) && has_lip(m) && {
+                let child = |k: usize| folds.iter().position(|f| f.parent == Some(k));
+                let (mut a, mut b) = (Some(k), Some(m));
+                loop {
+                    match (a, b) {
+                        (None, None) => break st.end == other.end,
+                        (Some(x), Some(y)) => {
+                            let (f, g) = (&folds[x], &folds[y]);
+                            if f.angle != g.angle
+                                || f.radius != g.radius
+                                || f.k_factor != g.k_factor
+                                || f.s0 != g.s0
+                                || f.bend_allowance != g.bend_allowance
+                                || f.up != g.up
+                            {
+                                break false;
+                            }
+                            (a, b) = (child(x), child(y));
+                        }
+                        _ => break false,
+                    }
+                }
+            };
+            if same && has_lip(k) && has_lip(m) && !(contour(k) && contour(m)) && !alike {
+                return unsupported("lips or hems on both flanges at a corner, unless both flanges and their lips are alike");
             }
             // Two hems meeting fold, but don't unfold.
             if spec_of(k).is_none() && spec_of(m).is_none() && !contour(k) && !contour(m) {
@@ -1136,7 +1160,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 shape,
                 run_on,
                 turn,
-                miter: feature(k).filter(|_| contour(k)).map(|_| Miter {
+                miter: (one_contour || alike).then_some(Miter {
                     vertex,
                     plane,
                     half_gap,
@@ -2372,6 +2396,7 @@ mod tests {
             vec![partial.clone()],
             vec![partial, lip("f2")],
             vec![flange(0), flange(2), lip("f0"), lip("f2")],
+            vec![flange(1), flange(2), lip("f1"), lip("f2")],
         ] {
             let l = layout(&plate(flanges)).unwrap();
             let cells: f64 = l.cells.iter().map(|c| signed_area(&c.polygon)).sum();
@@ -2447,23 +2472,30 @@ mod tests {
     fn unsupported_layouts_are_reported() {
         let unsupported =
             |part: &PartSpec| matches!(flat_pattern(part), Err(SheetError::Unsupported(_)));
-        // Flanges meeting at a corner: a lip on one of them, not on both.
-        let lip = |id: &str, on: &str| Flange {
+        // Flanges alike meeting at a corner: a lip on one of them, or lips
+        // alike on both (mitered), not different lips on both.
+        let lip = |id: &str, on: &str, length: f64| Flange {
             id: id.into(),
             on: EdgeRef::Tip(on.into()),
-            length: 15.0,
+            length,
             ..flange(2)
         };
         assert!(!unsupported(&plate(vec![
             flange(1),
             flange(2),
-            lip("l2", "f2")
+            lip("l2", "f2", 15.0)
+        ])));
+        assert!(!unsupported(&plate(vec![
+            flange(1),
+            flange(2),
+            lip("l1", "f1", 15.0),
+            lip("l2", "f2", 15.0)
         ])));
         assert!(unsupported(&plate(vec![
             flange(1),
             flange(2),
-            lip("l1", "f1"),
-            lip("l2", "f2")
+            lip("l1", "f1", 15.0),
+            lip("l2", "f2", 10.0)
         ])));
         // A remnant shorter than 2T next to a relief runs the notch on to
         // the corner; not yet where a flange sits on the other edge there.

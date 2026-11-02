@@ -16,7 +16,8 @@ meshed. What it doesn't build yet it refuses with a clear message; it never appr
   chamfered tip corners.
 - **Corners** between flanges at any angle: trim to bend with a miter gap, round, square,
   weld or tear reliefs, overlapping seams; flanges, hems and contours with different settings
-  meeting by build order.
+  meeting by build order. Lips on both flanges at a corner are mitered there like one contour
+  along both edges when flanges and lips are alike (one feature on two edges).
 - **Hems:** single, double, teardrop, rolled, full or partial width.
 - **Contour flanges** of lines and tangent arcs on a base edge or a flange's tip, full or
   partial width, or along several edges in one go, mitered at each corner (every leg and
@@ -86,7 +87,9 @@ clash in red, folded and flat.
 ## Tests
 
 `cargo test` checks flat patterns, folded solids, mass properties and exports of the main
-cases against known values. `examples/fuzz.rs` throws random parts at the kernel.
+cases against known values. `examples/measure.rs` prints flat size, flat area and folded
+volume of any parts, for comparing with another CAD system; `examples/fuzz.rs` throws random
+parts at the kernel.
 
 The geometry kernel is a fork of [OpenGeometry](https://github.com/OpenGeometry-io/OpenGeometry)
 (KERNEL.md: why, and what the fork changes).
