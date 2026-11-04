@@ -346,8 +346,7 @@ pub(crate) fn cut(
             let (sp, sq) = (c.s_of(p), c.s_of(q));
             for s in cut_crossings(&c, sp, sq, clip) {
                 let point = c.point(s);
-                if (on[k] && dist(point, p) <= EPS) || (on[(k + 1) % n] && dist(point, q) <= EPS)
-                {
+                if (on[k] && dist(point, p) <= EPS) || (on[(k + 1) % n] && dist(point, q) <= EPS) {
                     continue;
                 }
                 let ahead = c.point(s + (sq - sp).signum() * 1e-6);

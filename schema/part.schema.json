@@ -546,7 +546,7 @@
       ]
     },
     "FoldLine": {
-      "description": "A bend along a straight line across the base: the part to the right of\n`line[0] -> line[1]` (seen from +z) turns, the rest stays. Uses the part's\nbend radius.",
+      "description": "A bend along a straight line across the base, or across a flange, hem or\ncontour strip in the flat (it folds that strip): the part to the right of\n`line[0] -> line[1]` (seen from +z) turns, the rest stays. On a strip the\nside away from the strip's own bend turns, whichever way the line runs.\nUses the part's bend radius.",
       "type": "object",
       "properties": {
         "angle": {

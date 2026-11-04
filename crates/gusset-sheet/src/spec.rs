@@ -105,9 +105,11 @@ impl BendTable {
     }
 }
 
-/// A bend along a straight line across the base: the part to the right of
-/// `line[0] -> line[1]` (seen from +z) turns, the rest stays. Uses the part's
-/// bend radius.
+/// A bend along a straight line across the base, or across a flange, hem or
+/// contour strip in the flat (it folds that strip): the part to the right of
+/// `line[0] -> line[1]` (seen from +z) turns, the rest stays. On a strip the
+/// side away from the strip's own bend turns, whichever way the line runs.
+/// Uses the part's bend radius.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FoldLine {

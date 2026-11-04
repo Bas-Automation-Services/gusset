@@ -1,7 +1,7 @@
-//! Folds along a line across the base (a fold feature). The flat
-//! pattern doesn't change: each fold splits the base into what stays, a bend
-//! strip and what turns. Flanges and hems on edges wholly on the turning side
-//! turn with the fold; a fold line may not run through them.
+//! Folds along a line across the base or a flange (a fold feature). The flat
+//! pattern doesn't change: each fold splits the region its bend crosses into
+//! what stays, a bend strip and what turns. Flanges and hems wholly on the
+//! turning side turn with the fold; a fold line may not run through them.
 
 use crate::flat::{Arc, Cell, Curve, FlatBend, Fold, Layout, Zone, P2};
 use crate::spec::{BendLocation, PartSpec, Side};
@@ -67,19 +67,22 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
     let mut folds = lines.clone();
     folds.append(&mut layout.folds);
 
-    // Each fold line splits the one region it crosses: the base, or the part
-    // an earlier fold turns (then it is nested in that fold). Below the bend
-    // stays, the strip bends, the rest turns.
+    // Each fold line splits the one region its bend crosses: the base, a
+    // flange (or hem, contour) strip, or the part an earlier fold turns (then
+    // it is nested in that fold). Below the bend stays, the strip bends, the
+    // rest turns.
     let mut bends = Vec::new();
-    for (i, f) in lines.iter().enumerate() {
+    for i in 0..nf {
         let mut region = None;
         for c in &layout.cells {
             let foldable = match c.zone {
                 Zone::Base => true,
-                Zone::Flange(j) => j < i,
+                Zone::Flange(j) => j < i || j >= nf,
                 Zone::Bend(_) => false,
             };
-            if foldable && extent(c, |p| s(f, p)).1 > f.s0 + EPS {
+            let f = &lines[i];
+            let (lo, hi) = extent(c, |p| s(f, p));
+            if foldable && lo < f.s0 + f.bend_allowance - EPS && hi > f.s0 + EPS {
                 if region.is_some_and(|z| z != c.zone) {
                     return unsupported(format!(
                         "fold {} crosses more than one region of the part",
@@ -91,13 +94,26 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         }
         let Some(region) = region else {
             return Err(SheetError::Invalid(format!(
-                "fold {}: its line must cross the base",
-                f.flange
+                "fold {}: its line must cross the part",
+                lines[i].flange
             )));
         };
         if let Zone::Flange(j) = region {
             folds[i].parent = Some(j);
+            // On a strip, the side towards the strip's own bend stays: a fold
+            // the other way round is the same shape with the other side turning.
+            let toward_bend = layout.cells.iter().any(|c| {
+                c.zone == Zone::Bend(j) && extent(c, |p| s(&lines[i], p)).1 > lines[i].s0 + EPS
+            });
+            if toward_bend {
+                for f in [&mut lines[i], &mut folds[i]] {
+                    f.u = [-f.u[0], -f.u[1]];
+                    f.n = [-f.n[0], -f.n[1]];
+                    f.s0 = -f.bend_allowance - f.s0;
+                }
+            }
         }
+        let f = &lines[i];
         let mut cells = Vec::new();
         let (mut strips, mut turns) = (Vec::new(), Vec::new());
         for cell in layout.cells.drain(..) {
@@ -117,7 +133,7 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         }
         if strips.is_empty() || turns.is_empty() {
             return Err(SheetError::Invalid(format!(
-                "fold {}: its line must cross the base",
+                "fold {}: its line must cross the part",
                 f.flange
             )));
         }
@@ -155,8 +171,9 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         layout.cells = cells;
     }
 
-    // A flange or hem chain hangs on the deepest fold whose turning side
-    // holds its first bend.
+    // A flange or hem hangs on the deepest fold line whose turning side holds
+    // its bend, among those in the region it sits on (the base, or its
+    // parent's strip): a fold line's host is its first ancestor that isn't one.
     let depth = |folds: &[Fold], mut j: usize| {
         let mut d = 0;
         while let Some(p) = folds[j].parent {
@@ -165,28 +182,38 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         }
         d
     };
-    for root in nf..folds.len() {
-        if folds[root].parent.is_some() {
-            continue;
+    let host = |folds: &[Fold], mut j: usize| loop {
+        match folds[j].parent {
+            Some(p) if p < nf => j = p,
+            other => return other,
         }
+    };
+    for k in nf..folds.len() {
+        let on = folds[k].parent;
         let deepest = layout
             .cells
             .iter()
-            .filter(|c| c.zone == Zone::Bend(root))
+            .filter(|c| c.zone == Zone::Bend(k))
             .flat_map(|c| {
                 lines
                     .iter()
                     .enumerate()
-                    .filter(|(_, f)| extent(c, |p| s(f, p)).0 >= f.s0 + f.bend_allowance - EPS)
+                    .filter(|&(i, f)| {
+                        host(&folds, i) == on
+                            && extent(c, |p| s(f, p)).0 >= f.s0 + f.bend_allowance - EPS
+                    })
                     .map(|(i, _)| i)
                     .collect::<Vec<_>>()
             })
             .max_by_key(|&i| depth(&folds, i));
-        folds[root].parent = deepest;
+        if deepest.is_some() {
+            folds[k].parent = deepest;
+        }
     }
 
-    // Every cell lies on the turning side of the folds it hangs on (through
-    // its chain) and on the staying side of every other fold.
+    // Every cell in a fold line's host region lies on the turning side of the
+    // folds it hangs on (through its chain) and on the staying side of every
+    // other fold.
     let hangs_on = |mut j: usize, i: usize| loop {
         if j == i {
             return true;
@@ -197,7 +224,17 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         }
     };
     for (i, f) in lines.iter().enumerate() {
+        let h = host(&folds, i);
         for c in &layout.cells {
+            let owner = match c.zone {
+                Zone::Base => None,
+                Zone::Bend(j) | Zone::Flange(j) => Some(j),
+            };
+            if let Some(h) = h {
+                if !owner.is_some_and(|j| hangs_on(j, h)) {
+                    continue;
+                }
+            }
             let (lo, hi) = extent(c, |p| s(f, p));
             let ok = match c.zone {
                 Zone::Bend(j) if j == i => true,
@@ -214,7 +251,35 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
 
     bends.append(&mut layout.flat.bends);
     layout.flat.bends = bends;
-    layout.folds = folds;
+    // Parents before children (a fold line on a flange comes after it).
+    let mut order = Vec::with_capacity(folds.len());
+    let mut placed = vec![false; folds.len()];
+    while order.len() < folds.len() {
+        for j in 0..folds.len() {
+            if !placed[j] && folds[j].parent.is_none_or(|p| placed[p]) {
+                placed[j] = true;
+                order.push(j);
+            }
+        }
+    }
+    let mut new = vec![0; folds.len()];
+    for (k, &j) in order.iter().enumerate() {
+        new[j] = k;
+    }
+    layout.folds = order
+        .iter()
+        .map(|&j| Fold {
+            parent: folds[j].parent.map(|p| new[p]),
+            ..folds[j].clone()
+        })
+        .collect();
+    for c in &mut layout.cells {
+        c.zone = match c.zone {
+            Zone::Bend(j) => Zone::Bend(new[j]),
+            Zone::Flange(j) => Zone::Flange(new[j]),
+            zone => zone,
+        };
+    }
     Ok(())
 }
 
@@ -497,8 +562,88 @@ mod tests {
     }
 
     #[test]
+    fn a_fold_line_on_a_flange_folds_the_flange() {
+        // Across the 30 mm flange on edge 0, 20 mm up (flat y = -18.3982;
+        // 15 mm up for the fold down): whichever way the line runs, the tip
+        // side turns. The flat stays; a lip on the tip turns along.
+        let (y, y2) = (-18.398229715, -13.398229715);
+        let lip = r#"{ "id": "l", "on": { "tip": "f1" }, "angle": 90, "length": 10,
+                       "datum": "outer", "position": "outside", "side": "up" }"#;
+        for (line, location, side, with_lip, volume) in [
+            (
+                format!("[[0,{y}],[100,{y}]]"),
+                "centerline",
+                "up",
+                false,
+                17805.3096,
+            ),
+            (
+                format!("[[100,{y}],[0,{y}]]"),
+                "centerline",
+                "up",
+                false,
+                17805.3096,
+            ),
+            (
+                format!("[[100,{y2}],[0,{y2}]]"),
+                "start",
+                "down",
+                false,
+                17805.3096,
+            ),
+            (
+                format!("[[0,{y}],[100,{y}]]"),
+                "centerline",
+                "up",
+                true,
+                19547.7874,
+            ),
+            (
+                "[[70,-28.398229715],[100,-10]]".into(),
+                "centerline",
+                "up",
+                false,
+                17764.5897,
+            ),
+        ] {
+            let what = format!("{line} {location} {side} lip {with_lip}");
+            let mut spec = with_flange(&line, 0, RECT);
+            spec.folds[0].location = serde_json::from_str(&format!("\"{location}\"")).unwrap();
+            spec.folds[0].side = serde_json::from_str(&format!("\"{side}\"")).unwrap();
+            if with_lip {
+                spec.flanges.push(serde_json::from_str(lip).unwrap());
+            }
+            let mut plain = spec.clone();
+            plain.folds.clear();
+            let l = layout(&spec).unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(
+                l.flat.outline,
+                layout(&plain).unwrap().flat.outline,
+                "{what}"
+            );
+            // The fold line hangs on the flange, after it; the lip on the fold line.
+            let at = |id: &str| l.folds.iter().position(|f| f.flange == id).unwrap();
+            assert_eq!(l.folds[at("f")].parent, Some(at("f1")), "{what}");
+            assert!(at("f1") < at("f"), "{what}");
+            if with_lip {
+                assert_eq!(l.folds[at("l")].parent, Some(at("f")), "{what}");
+            }
+            let e = crate::fold::exact_mass(&spec).unwrap();
+            assert!((e.volume - volume).abs() < 1e-3, "{what}: {}", e.volume);
+            // The mesh falls short by ~1e-5 per bend at this deflection.
+            let m = mass(&fold(&spec).unwrap(), 1e-3).unwrap();
+            assert!(
+                ((m.volume - e.volume) / e.volume).abs() < 5e-5,
+                "{what}: mesh {}",
+                m.volume
+            );
+        }
+    }
+
+    #[test]
     fn a_fold_line_may_not_run_through_a_flange() {
-        // Edge 1 (x = 100) carries the flange; the line crosses it.
+        // Edge 1 (x = 100) carries the flange; the line crosses it. The flange
+        // would have to fold along the line too, which a sheet can't.
         let spec = with_flange("[[100,40],[0,40]]", 1, RECT);
         assert!(matches!(
             layout(&spec),
