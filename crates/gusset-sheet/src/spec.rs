@@ -230,8 +230,8 @@ pub struct Relief {
     pub width: f64,
     /// How far the notch reaches past the start of the bend, into the base.
     pub depth: f64,
-    /// Base edge left between a notch and the corner must be at least this
-    /// long; Gusset doesn't build shorter remnants yet.
+    /// A notch leaving no more than this of the base edge to its corner runs
+    /// on to the neighbouring edge instead (next to an arc the remnant stays).
     pub minimum_remnant: f64,
     /// Where two flanges meet at a corner: the gap between their inner
     /// corners. Default T.
@@ -371,7 +371,9 @@ pub struct Base {
     /// Per outline edge: 0 for a line, otherwise tan(sweep / 4) of an arc (as
     /// a DXF bulge; positive turns counter-clockwise). No feature sits on an
     /// arc edge. A flange running into a tangent arc (a rounded corner) gets
-    /// a straight relief whose notch runs on to the arc. All lines when empty.
+    /// a relief whose notch runs on to the arc; one meeting an arc at an
+    /// angle ends its bend where the bend's start line meets the arc. All
+    /// lines when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bulges: Vec<f64>,
     /// In place of an outline: the part is a profile run along a width.

@@ -286,9 +286,9 @@ enum End {
     /// A partial flange's end: a relief notch.
     Relief,
     /// A strip's end next to a base edge that isn't square to it and carries
-    /// no flange there: the flange ends square at the vertex; the bend ends
-    /// in a slanted cut from `bend` (where its start line meets the
-    /// neighbouring edge) to the vertex at its far edge.
+    /// no flange there, or an arc at an angle to it: the flange ends square
+    /// at the vertex; the bend ends in a slanted cut from `bend` (where its
+    /// start line meets the neighbouring edge) to the vertex at its far edge.
     Open { bend: f64 },
     /// A relief notch that runs on to the neighbouring edge: next to a
     /// tangent arc (a rounded corner), a notch to `corner` (its far bottom
@@ -635,12 +635,15 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             };
             if !at_corner {
                 let remnant = if side == 0 { st.t0 } else { length - st.t1 };
-                if remnant - width <= relief.minimum_remnant + 1e-6 {
+                // Next to an arc the remnant stays, however short.
+                if base_arcs[neighbour].is_some() && remnant - width < EPS {
+                    return unsupported("a relief notch reaching past its edge into an arc");
+                }
+                if remnant - width <= relief.minimum_remnant + 1e-6
+                    && base_arcs[neighbour].is_none()
+                {
                     // The notch's bottom runs on to the neighbouring edge
                     // instead (also at exactly the minimum).
-                    if base_arcs[neighbour].is_some() {
-                        return unsupported("a short remnant next to an arc");
-                    }
                     let vertex = if side == 0 {
                         base[i]
                     } else {
@@ -721,9 +724,6 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     [r[1], -r[0]]
                 };
                 let radius = dot(r, r).sqrt();
-                if cross2(tangent, u).abs() > 1e-6 * radius || dot(tangent, u) < 0.0 {
-                    return unsupported("running into an arc that isn't tangent to its edge");
-                }
                 // The arc runs from `from` to `to`.
                 let (from, to) = if side == 0 {
                     (base[neighbour], vertex)
@@ -753,11 +753,25 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 } else {
                     (u, st.t1)
                 };
-                if relief.shape == ReliefShape::Tear {
-                    // The torn corner would stretch there.
-                    return unsupported("a tear relief next to an arc");
+                if cross2(tangent, u).abs() > 1e-6 * radius || dot(tangent, u) < 0.0 {
+                    // An arc at an angle to the edge: an open end, the bend
+                    // start line cut off where it meets the arc (the crossing
+                    // nearest the vertex).
+                    let o = at(i, end_t, st.setback);
+                    let p = [1.0, -1.0]
+                        .into_iter()
+                        .filter_map(|sign| meet(o, out, sign))
+                        .filter(|&p| along(p) <= along(to) + EPS)
+                        .min_by(|p, q| dist(*p, o).total_cmp(&dist(*q, o)));
+                    let Some(p) = p else {
+                        return unsupported("its bend start runs past the neighbouring arc");
+                    };
+                    sides[i][side] = End::Open {
+                        bend: dot(sub(p, a), u),
+                    };
+                    continue;
                 }
-                let depth = st.setback - relief.depth;
+                let depth = st.setback - notch_depth;
                 let far = end_t + if side == 0 { -width } else { width };
                 // The remnant: from the notch's far side to the arc, along the
                 // bend start line. The notch runs on to the arc when it is
@@ -1535,6 +1549,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     };
 
     // The outline, edge by edge: base corner, then the strip's profile.
+    let torn = relief.shape == ReliefShape::Tear;
     let mut outline = Path::default();
     for i in 0..n {
         // A corner, or an open end on either side, cuts the base vertex off.
@@ -1562,6 +1577,10 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 outline.line(at(i, st.t0, be));
             }
             End::Relief => notch(&mut outline, i, &st, true, true),
+            // A tear's slit next to an arc: torn, not cut, as `notch` does.
+            End::RunOn {
+                corner: Some(_), ..
+            } if torn => outline.line(at(i, st.t0, 0.0)),
             End::RunOn { corner, p, round } => {
                 outline.line(p);
                 if let Some(c) = corner {
@@ -1621,8 +1640,15 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             End::Open { .. } => {
                 outline.line(at(i, st.t1, be));
                 outline.line(at(i, b1, st.setback));
+                *outline.arcs.last_mut().unwrap() = base_arcs[(i + 1) % n].map(Curve::Arc);
             }
             End::Relief => notch(&mut outline, i, &st, false, true),
+            End::RunOn {
+                corner: Some(_), ..
+            } if torn => {
+                outline.line(at(i, st.t1, 0.0));
+                *outline.arcs.last_mut().unwrap() = base_arcs[(i + 1) % n].map(Curve::Arc);
+            }
             End::RunOn { corner, p, round } => {
                 if round {
                     quarter(&mut outline, i, &st, false, corner.is_some());
@@ -2355,6 +2381,75 @@ mod tests {
         assert!((corners - 2.0 * (4.0 - std::f64::consts::PI)).abs() < 1e-9);
         let short = area("round", 1.0);
         assert!((short - 8151.63898178028).abs() < 1e-9, "{short}");
+    }
+
+    #[test]
+    fn flanges_next_to_arcs() {
+        let part = |outline: &str, bulges: &str, relief: &str, flange: &str| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{ "id": "a", "thickness": 2, "bend_radius": 2, "k_factor": 0.4, "relief": {{ {relief} }},
+                "base": {{ "outline": {outline}, "bulges": {bulges} }},
+                "flanges": [{{ "id": "f", {flange}, "angle": 90, "length": 30,
+                               "datum": "outer", "position": "outside", "side": "up" }}] }}"#
+            ))
+            .unwrap()
+        };
+        let q = 0.41421356237309503;
+        let rounded = |relief: &str, flange: &str| {
+            part(
+                "[[10,0],[90,0],[100,10],[100,50],[90,60],[10,60],[0,50],[0,10]]",
+                &format!("[0,{q},0,{q},0,{q},0,{q}]"),
+                relief,
+                flange,
+            )
+        };
+        let area = |p: &PartSpec| flat_pattern(p).unwrap().area();
+        let volume = |p: &PartSpec| crate::fold::exact_mass(p).unwrap().volume;
+        // Each flat: the rounded plate plus the strip past its edge.
+        let plate = 6000.0 - (4.0 - std::f64::consts::PI) * 100.0;
+        // (the bend starts 2 inside the edge; 26 of flange past it).
+        let strip = 24.0 + std::f64::consts::FRAC_PI_2 * 2.8;
+
+        // A tear: its 0.01 slit up to the arc, torn in the flat; in 3D 2 x
+        // 0.01 by ~2.01 through the sheet.
+        let tear = rounded(
+            r#""shape": "tear", "width": 2, "depth": 1, "minimum_remnant": 4"#,
+            r#""on": { "base": 4 }"#,
+        );
+        assert!((area(&tear) - (plate + 80.0 * strip)).abs() < 1e-9);
+        let v = volume(&tear);
+        assert!((v - 16422.220368103895).abs() < 1e-6, "{v}");
+        // ...whose remnant to the arc is short: it runs on at its depth.
+        let tear = rounded(
+            r#""shape": "tear", "width": 2, "depth": 1, "minimum_remnant": 8"#,
+            r#""on": { "base": 4 }"#,
+        );
+        assert!((area(&tear) - 8169.547399).abs() < 1e-6);
+
+        // A partial flange keeps its remnant to an arc, however short: two
+        // plain 4 x 5 notches.
+        let partial = rounded(
+            r#""width": 4, "depth": 3, "minimum_remnant": 4"#,
+            r#""on": { "base": 4 }, "width": { "offset_start": 6, "offset_end": 6 }"#,
+        );
+        assert!((area(&partial) - (plate + 68.0 * strip - 40.0)).abs() < 1e-9);
+
+        // An arc at an angle to the edge (convex or concave): the bend
+        // start line is cut off where it meets the arc.
+        for (bulge, expected) in [(0.2, 9082.682068), (-0.2, 8596.963875)] {
+            let angled = part(
+                "[[0,0],[100,0],[100,60],[0,60]]",
+                &format!("[0,{bulge},0,0]"),
+                r#""width": 2, "depth": 1, "minimum_remnant": 4"#,
+                r#""on": { "base": 0 }"#,
+            );
+            let f = flat_pattern(&angled).unwrap();
+            assert!((f.area() - expected).abs() < 1e-6, "{}", f.area());
+            // On the arc (centre (28, 30) or (172, 30), radius 78) at y = 2.
+            let meet = 28.0 + 5300f64.sqrt();
+            let meet = if bulge > 0.0 { meet } else { 200.0 - meet };
+            assert!(f.outline.iter().any(|p| dist(*p, [meet, 2.0]) < 1e-9));
+        }
     }
 
     #[test]

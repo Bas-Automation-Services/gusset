@@ -94,7 +94,7 @@
       "type": "object",
       "properties": {
         "bulges": {
-          "description": "Per outline edge: 0 for a line, otherwise tan(sweep / 4) of an arc (as\na DXF bulge; positive turns counter-clockwise). No feature sits on an\narc edge. A flange running into a tangent arc (a rounded corner) gets\na straight relief whose notch runs on to the arc. All lines when empty.",
+          "description": "Per outline edge: 0 for a line, otherwise tan(sweep / 4) of an arc (as\na DXF bulge; positive turns counter-clockwise). No feature sits on an\narc edge. A flange running into a tangent arc (a rounded corner) gets\na relief whose notch runs on to the arc; one meeting an arc at an\nangle ends its bend where the bend's start line meets the arc. All\nlines when empty.",
           "type": "array",
           "items": {
             "type": "number",
@@ -928,7 +928,7 @@
           "format": "double"
         },
         "minimum_remnant": {
-          "description": "Base edge left between a notch and the corner must be at least this\nlong; Gusset doesn't build shorter remnants yet.",
+          "description": "A notch leaving no more than this of the base edge to its corner runs\non to the neighbouring edge instead (next to an arc the remnant stays).",
           "type": "number",
           "format": "double"
         },
