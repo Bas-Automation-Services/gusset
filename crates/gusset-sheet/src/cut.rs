@@ -342,14 +342,21 @@ pub(crate) fn cut(
             }
         }
         if let Some(Curve::Cut(c)) = cell.arcs[k] {
-            // A mitered bend's end: nothing may cut across it.
-            let inside = c
-                .points(p, q, 32)
-                .iter()
-                .filter(|x| clip.contains(**x))
-                .count();
-            if inside > 0 && inside < 33 {
-                return unsupported("across a mitered bend's end");
+            // A mitered bend's end: where the clip's boundary crosses it.
+            let (sp, sq) = (c.s_of(p), c.s_of(q));
+            for s in cut_crossings(&c, sp, sq, clip) {
+                let point = c.point(s);
+                if (on[k] && dist(point, p) <= EPS) || (on[(k + 1) % n] && dist(point, q) <= EPS)
+                {
+                    continue;
+                }
+                let ahead = c.point(s + (sq - sp).signum() * 1e-6);
+                crossings.push(Crossing {
+                    segment: k,
+                    t: (s - sp) / (sq - sp),
+                    p: point,
+                    entering: clip.contains(ahead),
+                });
             }
             continue;
         }
@@ -421,7 +428,8 @@ pub(crate) fn cut(
             visited[cur] = true;
             let x = crossings[cur];
             pts_out.push(x.p);
-            arcs_out.push(None);
+            // The rest of x's segment: a line, or the same curve.
+            arcs_out.push(cell.arcs[x.segment]);
             // Along the boundary: the next crossing in boundary order.
             let next = (cur + 1) % crossings.len();
             let e = crossings[next];
@@ -655,6 +663,36 @@ fn cut_across(
         }
     }
     Ok(())
+}
+
+/// Flat s where a mitered bend's end from s = a to b crosses the clip's
+/// boundary, in order from a. Found in s ascending whichever way it runs, so
+/// a cell and the outline sharing the curve get the same points.
+fn cut_crossings(c: &crate::flat::Cut, a: f64, b: f64, clip: &Clip) -> Vec<f64> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    let pieces = 256;
+    let s = |j: usize| lo + (hi - lo) * j as f64 / pieces as f64;
+    let mut out = Vec::new();
+    for j in 0..pieces {
+        let (mut s0, mut s1) = (s(j), s(j + 1));
+        let inside = clip.contains(c.point(s0));
+        if inside == clip.contains(c.point(s1)) {
+            continue;
+        }
+        for _ in 0..80 {
+            let m = (s0 + s1) / 2.0;
+            if clip.contains(c.point(m)) == inside {
+                s0 = m;
+            } else {
+                s1 = m;
+            }
+        }
+        out.push((s0 + s1) / 2.0);
+    }
+    if a > b {
+        out.reverse();
+    }
+    out
 }
 
 /// Whether p lies inside a closed boundary of lines and arcs: crossings of a
