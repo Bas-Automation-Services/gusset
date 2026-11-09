@@ -141,7 +141,7 @@ pub fn check(spec: &PartSpec, rules: &Rules) -> Result<Vec<Finding>, SheetError>
             _ => None,
         })
         .collect();
-    for (n, h) in spec.base.holes.iter().enumerate() {
+    for (n, h) in l.holes.iter().enumerate() {
         let name = format!("hole {}", n + 1);
         let r = h.diameter / 2.0;
         find(Rule::HoleSize, name.clone(), h.diameter, rules.min_hole * t);

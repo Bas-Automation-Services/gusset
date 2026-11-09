@@ -29,6 +29,13 @@
         "$ref": "#/$defs/Contour"
       }
     },
+    "face_cuts": {
+      "description": "Holes and cut-outs placed on a flange's face instead of in the flat.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FaceCuts"
+      }
+    },
     "flanges": {
       "type": "array",
       "default": [],
@@ -464,6 +471,32 @@
             "tip"
           ]
         }
+      ]
+    },
+    "FaceCuts": {
+      "description": "Holes and cut-outs on a flange's face, cut square through it. Positions\nare [along, up]: along the edge the flange stands on (from its start, as\nin the flat), and along the face from the outer mold line, where the\nflange's outer face meets the plane of the outer face it is bent from (for\na 90-degree flange: the height over that face). Cut-outs run\ncounter-clockwise in [along, up]. They stay on the flat of the face, clear\nof its bends; across its tip or ends they are notches.",
+      "type": "object",
+      "properties": {
+        "cutouts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Cutout"
+          }
+        },
+        "holes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Hole"
+          }
+        },
+        "on": {
+          "description": "The flange (or a flange on its tip) whose face they are on.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "on"
       ]
     },
     "Flange": {

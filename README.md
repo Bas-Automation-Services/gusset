@@ -27,7 +27,8 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
 - **Folds** along a line across the plate or a flange, nested, at any angle to the outline; **jogs**
   (Z-steps by an offset).
 - **Holes and cut-outs** anywhere in the flat, across bends, and across the outline as
-  notches, also through a mitered bend's curved end.
+  notches, also through a mitered bend's curved end; or placed on a flange's face, measured
+  along its edge and up from the mold line.
 - **Unfolding** by K-factor (per part or per feature) or by a bend table (DIN 6935 style: bend deduction by radius and angle).
 - **Shop checks:** bend radius, leg length, hole distance to bends and edges, hole size.
 - **Parts that fold into themselves** are refused, naming the features and where they meet;

@@ -85,6 +85,34 @@ impl Ring {
     }
 }
 
+/// Lowest and highest distance of a ring from `origin` along unit `d`,
+/// arcs exact.
+fn extent_along(ring: &Ring, d: P2, origin: P2) -> (f64, f64) {
+    let n = ring.points.len();
+    let at = |p: P2| dot(sub(p, origin), d);
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for k in 0..n {
+        let (p, q) = (ring.points[k], ring.points[(k + 1) % n]);
+        let mut seen = vec![at(p)];
+        if let Some(Curve::Arc(a)) = ring.arcs[k] {
+            // The arc's points furthest along +d and -d, where it passes them.
+            let r = dot(sub(p, a.center), sub(p, a.center)).sqrt();
+            let sweep = a.sweep(p, q);
+            for sign in [1.0, -1.0] {
+                let x = add(a.center, scale(d, sign * r));
+                let to = a.sweep(p, x);
+                if to.signum() == sweep.signum() && to.abs() <= sweep.abs() {
+                    seen.push(at(x));
+                }
+            }
+        }
+        for v in seen {
+            (lo, hi) = (lo.min(v), hi.max(v));
+        }
+    }
+    (lo, hi)
+}
+
 /// A boundary segment that runs around `center` instead of straight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arc {
@@ -418,6 +446,9 @@ pub struct Layout {
     /// with the holes cut out. Together they tile the flat pattern.
     pub cells: Vec<Cell>,
     pub folds: Vec<Fold>,
+    /// Every hole in the flat, in spec order: the base's, then those on
+    /// flange faces.
+    pub holes: Vec<Hole>,
 }
 
 #[derive(Clone, Debug)]
@@ -1373,6 +1404,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         },
         cells: Vec::new(),
         folds: folds.clone(),
+        holes: Vec::new(),
     };
     let maps = crate::fold::Model::new(spec, &shape);
     // A mitered chain's end along edge i at flat s, past its first bend:
@@ -2078,16 +2110,92 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         bends[k].line = [at(i, l0, centre), at(i, l1, centre)];
     }
 
+    // Holes and cut-outs on a flange's face, into the flat: along the edge as
+    // they are, up from the bend's end less its outer setback (the flange's
+    // face is flat from there to the next bend).
+    let mut holes = spec.base.holes.clone();
+    let mut cutouts: Vec<Ring> = spec.base.cutouts.iter().map(Ring::from_cutout).collect();
+    for fc in &spec.face_cuts {
+        let mut on = folds.iter().enumerate().filter(|(_, f)| f.flange == fc.on);
+        let (Some((k, f)), None, true) = (
+            on.next(),
+            on.next(),
+            spec.flanges.iter().any(|g| g.id == fc.on),
+        ) else {
+            return Err(SheetError::Invalid(format!(
+                "face cuts: no flange {}",
+                fc.on
+            )));
+        };
+        let start = f.s0 + f.bend_allowance;
+        let setback = (f.radius + spec.thickness) * (f.angle / 2.0).tan();
+        let next = folds
+            .iter()
+            .filter(|g| g.parent == Some(k))
+            .map(|g| g.s0)
+            .fold(f64::INFINITY, f64::min);
+        let map = |p: P2| {
+            add(
+                f.edge_point,
+                add(scale(f.u, p[0]), scale(f.n, start + p[1] - setback)),
+            )
+        };
+        // Flat distances from the edge: lowest and highest.
+        let on_face = |(lo, hi): (f64, f64)| {
+            if lo < start - EPS || hi > next + EPS {
+                return Err(SheetError::Unsupported(format!(
+                    "face cuts on {}: reaching into a bend",
+                    fc.on
+                )));
+            }
+            Ok(())
+        };
+        for h in &fc.holes {
+            let center = map(h.center);
+            let s = dot(sub(center, f.edge_point), f.n);
+            let r = h.diameter / 2.0;
+            on_face((s - r, s + r))?;
+            holes.push(Hole {
+                center,
+                diameter: h.diameter,
+            });
+        }
+        for c in &fc.cutouts {
+            // The face frame is mirrored against the flat: arcs turn the
+            // other way, and the ring runs back to counter-clockwise.
+            let ring = Ring::from_cutout(c);
+            let mapped = Ring {
+                points: ring.points.iter().map(|&p| map(p)).collect(),
+                arcs: ring
+                    .arcs
+                    .iter()
+                    .map(|a| {
+                        a.and_then(Curve::arc).map(|a| {
+                            Curve::Arc(Arc {
+                                center: map(a.center),
+                                ccw: !a.ccw,
+                            })
+                        })
+                    })
+                    .collect(),
+            }
+            .reversed();
+            on_face(extent_along(&mapped, f.n, f.edge_point))?;
+            cutouts.push(mapped);
+        }
+    }
+
     let mut layout = Layout {
         flat: FlatPattern {
             outline: outline.pts,
             outline_arcs: outline.arcs,
-            holes: spec.base.holes.clone(),
-            cutouts: spec.base.cutouts.iter().map(Ring::from_cutout).collect(),
+            holes: holes.clone(),
+            cutouts,
             bends,
         },
         cells,
         folds,
+        holes: holes.clone(),
     };
     for (clip, cells) in &corner_clips {
         crate::cut::cut_corner(&mut layout, clip, *cells)?;
@@ -2096,11 +2204,8 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         crate::foldline::apply_folds(&mut layout, spec)?;
     }
     // A hole across the outline is a round notch: a circular cut-out.
-    let (across, inside): (Vec<Hole>, Vec<Hole>) = spec
-        .base
-        .holes
-        .iter()
-        .cloned()
+    let (across, inside): (Vec<Hole>, Vec<Hole>) = holes
+        .into_iter()
         .partition(|h| crate::cut::crosses_outline(&layout.flat, h));
     layout.flat.holes = inside.clone();
     let notches = across.iter().map(|h| {
@@ -2245,6 +2350,7 @@ mod tests {
             folds: Vec::new(),
 
             jogs: Vec::new(),
+            face_cuts: Vec::new(),
         }
     }
 
@@ -2706,6 +2812,46 @@ mod tests {
             l.cells.iter().filter(|c| c.zone == Zone::Bend(0)).count(),
             2
         );
+    }
+
+    #[test]
+    fn holes_and_cutouts_on_a_flange_face_land_in_the_flat() {
+        // Flange on edge 2 (along -x from (100, 60)): its bend ends 2.398
+        // past the edge, its outer setback is 4. A hole 30 along, 15 up lands
+        // at (70, 73.398); a slot [50..70] x [10..14] with round ends the same
+        // way, still counter-clockwise.
+        let part = |up: f64| -> PartSpec {
+            let mut p = plate(vec![flange(2)]);
+            p.face_cuts = vec![crate::spec::FaceCuts {
+                on: "f2".into(),
+                holes: vec![Hole {
+                    center: [30.0, up],
+                    diameter: 6.0,
+                }],
+                cutouts: vec![crate::spec::Cutout {
+                    outline: vec![[50.0, 10.0], [70.0, 10.0], [70.0, 14.0], [50.0, 14.0]],
+                    bulges: vec![0.0, 1.0, 0.0, 1.0],
+                }],
+            }];
+            p
+        };
+        let l = layout(&part(15.0)).unwrap();
+        let s = 60.0 + std::f64::consts::FRAC_PI_2 * 2.8 - 2.0 - 4.0;
+        assert!(l
+            .flat
+            .holes
+            .iter()
+            .any(|h| dist(h.center, [70.0, s + 15.0]) < 1e-9));
+        let slot = l.flat.cutouts.last().unwrap();
+        assert!(slot.area() > 0.0);
+        assert!((slot.area() - (20.0 * 4.0 + std::f64::consts::PI * 4.0)).abs() < 1e-9);
+        assert!(has(&slot.points, [50.0, s + 10.0]) && has(&slot.points, [30.0, s + 14.0]));
+        // 3 up, the hole reaches into the bend (the face starts 4 up).
+        assert_eq!(
+            layout(&part(6.5)).unwrap_err(),
+            SheetError::Unsupported("face cuts on f2: reaching into a bend".into())
+        );
+        layout(&part(7.5)).unwrap();
     }
 
     #[test]

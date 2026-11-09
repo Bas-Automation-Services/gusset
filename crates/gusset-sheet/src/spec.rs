@@ -39,6 +39,27 @@ pub struct PartSpec {
     /// Z-steps across the base: two folds each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub jogs: Vec<Jog>,
+    /// Holes and cut-outs placed on a flange's face instead of in the flat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub face_cuts: Vec<FaceCuts>,
+}
+
+/// Holes and cut-outs on a flange's face, cut square through it. Positions
+/// are [along, up]: along the edge the flange stands on (from its start, as
+/// in the flat), and along the face from the outer mold line, where the
+/// flange's outer face meets the plane of the outer face it is bent from (for
+/// a 90-degree flange: the height over that face). Cut-outs run
+/// counter-clockwise in [along, up]. They stay on the flat of the face, clear
+/// of its bends; across its tip or ends they are notches.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FaceCuts {
+    /// The flange (or a flange on its tip) whose face they are on.
+    pub on: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Hole>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cutouts: Vec<Cutout>,
 }
 
 /// A Z-step: the part to the right of `line[0] -> line[1]` (seen from +z)
