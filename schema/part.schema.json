@@ -988,6 +988,17 @@
           "description": "Straight (rectangular) by default.",
           "$ref": "#/$defs/ReliefShape"
         },
+        "transition": {
+          "description": "How a strip's free end next to an edge that isn't square to it (or an\narc at an angle) shows. Default: none.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Transition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "width": {
           "description": "Notch width along the edge.",
           "type": "number",
@@ -1047,6 +1058,37 @@
       "enum": [
         "up",
         "down"
+      ]
+    },
+    "Transition": {
+      "description": "A bend transition: the end of a strip next to an edge that isn't square\nto it. With none (or a straight line) the flange ends square at the\nvertex and the bend in a straight cut from where its start line meets the\nneighbouring edge to the vertex at its far edge.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "description": "The same as none.",
+          "type": "string",
+          "const": "straight_line"
+        },
+        {
+          "description": "The flat shows the strip ending square through the vertex (the\nfolded part as with none).",
+          "type": "string",
+          "const": "intersection"
+        },
+        {
+          "description": "As intersection, the corner at the vertex rounded with the bend\nradius.",
+          "type": "string",
+          "const": "arc"
+        },
+        {
+          "description": "The bend ends square where it first meets the neighbouring edge or\nthe vertex, the flange at the vertex; the base runs along the bend\nstart line to the neighbouring edge. Flat and folded.",
+          "type": "string",
+          "const": "trim_to_bend"
+        }
       ]
     },
     "Width": {

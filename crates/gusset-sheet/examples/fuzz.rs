@@ -125,6 +125,10 @@ fn spec(r: &mut Rng) -> String {
         ),
         1 => r#""relief": { "width": 2, "depth": 1, "minimum_remnant": 4, "corner": { "shape": "linear_weld" } },"#.to_string(),
         2 => r#""relief": { "width": 2, "depth": 1, "minimum_remnant": 4, "seam": "overlap" },"#.to_string(),
+        3 => format!(
+            r#""relief": {{ "width": 2, "depth": 1, "minimum_remnant": 4, "transition": "{}" }},"#,
+            r.pick(&["intersection", "arc", "trim_to_bend"])
+        ),
         _ => String::new(),
     };
     format!(

@@ -14,7 +14,8 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
 - **Base plates** of lines and arcs (rounded corners), or a **profile** run along a width
   (a contour flange as the first feature: channels, hats, Z-sections).
 - **Flanges** at any angle, every height datum, inside or outside, up or down, full or
-  partial width with straight, round or tear reliefs; lips on their tips; rounded or
+  partial width with straight, round or tear reliefs; bend transitions (intersection, arc,
+  trim to bend) where a flange ends next to a slanted edge; lips on their tips; rounded or
   chamfered tip corners.
 - **Corners** between flanges at any angle: trim to bend with a miter gap, round, square,
   weld or tear reliefs, overlapping seams; flanges, hems and contours with different settings

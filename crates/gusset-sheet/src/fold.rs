@@ -2216,6 +2216,7 @@ mod corner_angle_tests {
                 miter_gap: None,
                 corner: Some(CornerRelief { shape, size }),
                 seam: None,
+                transition: None,
             });
             spec
         };
@@ -2738,6 +2739,7 @@ mod contour_tests {
             miter_gap: None,
             corner: None,
             seam: None,
+            transition: None,
         });
         // Expected: volume, faces.
         for (name, spec, volume, faces) in [

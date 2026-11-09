@@ -265,6 +265,33 @@ pub struct Relief {
     /// Default: mitered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seam: Option<Seam>,
+    /// How a strip's free end next to an edge that isn't square to it (or an
+    /// arc at an angle) shows. Default: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<Transition>,
+}
+
+/// A bend transition: the end of a strip next to an edge that isn't square
+/// to it. With none (or a straight line) the flange ends square at the
+/// vertex and the bend in a straight cut from where its start line meets the
+/// neighbouring edge to the vertex at its far edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Transition {
+    #[default]
+    None,
+    /// The same as none.
+    StraightLine,
+    /// The flat shows the strip ending square through the vertex (the
+    /// folded part as with none).
+    Intersection,
+    /// As intersection, the corner at the vertex rounded with the bend
+    /// radius.
+    Arc,
+    /// The bend ends square where it first meets the neighbouring edge or
+    /// the vertex, the flange at the vertex; the base runs along the bend
+    /// start line to the neighbouring edge. Flat and folded.
+    TrimToBend,
 }
 
 /// How two flanges meeting at a corner close it.
@@ -378,6 +405,7 @@ impl PartSpec {
             miter_gap: None,
             corner: None,
             seam: None,
+            transition: None,
         })
     }
 }
