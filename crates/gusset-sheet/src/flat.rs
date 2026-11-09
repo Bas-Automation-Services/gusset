@@ -614,6 +614,8 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     let mut sides: Vec<[End; 2]> = vec![[End::Free, End::Free]; n];
     // Each with whether it cuts the cells too, or the flat pattern only.
     let mut corner_clips: Vec<(Clip, bool)> = Vec::new();
+    // Strip ends cut back by an earlier flange's run-on notch: free.
+    let mut cut = vec![[false; 2]; n];
     for i in 0..n {
         let Some(st) = strips[i] else { continue };
         let length = edge(i).3;
@@ -623,6 +625,9 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             )))
         };
         for (side, neighbour) in [(0, (i + n - 1) % n), (1, (i + 1) % n)] {
+            if cut[i][side] {
+                continue;
+            }
             let at_corner = if side == 0 {
                 st.t0 < EPS
             } else {
@@ -639,7 +644,30 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 if base_arcs[neighbour].is_some() && remnant - width < EPS {
                     return unsupported("a relief notch reaching past its edge into an arc");
                 }
-                if remnant - width <= relief.minimum_remnant + 1e-6
+                // An earlier flange on the neighbouring edge left this edge
+                // shorter: to its bend start, or to its own run-on notch's
+                // bottom.
+                let shortened = match strips[neighbour] {
+                    Some(o) if root[neighbour] < root[i] && base_arcs[neighbour].is_none() => {
+                        let lj = edge(neighbour).3;
+                        let (full, rest) = if side == 0 {
+                            (o.t1 > lj - EPS, lj - o.t1)
+                        } else {
+                            (o.t0 < EPS, o.t0)
+                        };
+                        let s = if full {
+                            Some(o.setback)
+                        } else if rest - width <= relief.minimum_remnant + 1e-6 {
+                            Some(o.setback - notch_depth)
+                        } else {
+                            None
+                        };
+                        let out = scale(edge(i).1, if side == 0 { -1.0 } else { 1.0 });
+                        s.map_or(0.0, |s| (-s / dot(out, edge(neighbour).2)).max(0.0))
+                    }
+                    _ => 0.0,
+                };
+                if remnant - shortened - width <= relief.minimum_remnant + 1e-6
                     && base_arcs[neighbour].is_none()
                 {
                     // The notch's bottom runs on to the neighbouring edge
@@ -658,25 +686,93 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                         st.setback - notch_depth,
                     );
                     let w = cross2(sub(vertex, from), uj) / cross2(u, uj);
-                    // A flange on the neighbouring edge reaching that point
-                    // would be cut through.
-                    let t_p = dot(sub(add(from, scale(u, w)), edge(neighbour).0), uj);
-                    let reached = strips[neighbour].is_some_and(|o| {
+                    let mut p = add(from, scale(u, w));
+                    let round = relief.shape == ReliefShape::Round;
+                    // A flange on the neighbouring edge reaching past the
+                    // notch's bottom line. Flanges are built in spec order:
+                    // the later one meets the corner the earlier one left.
+                    let t_p = dot(sub(p, edge(neighbour).0), uj);
+                    let reached = strips[neighbour].filter(|o| {
                         if side == 0 {
-                            o.t1 > t_p - EPS
+                            o.t1 > t_p + EPS
                         } else {
-                            o.t0 < t_p + EPS
+                            o.t0 < t_p - EPS
                         }
                     });
-                    if reached {
-                        return unsupported(
-                            "a short remnant next to a flange on the neighbouring edge",
-                        );
+                    if let Some(o) = reached {
+                        let (aj, _, nj, lj) = edge(neighbour);
+                        let full = if side == 0 {
+                            o.t1 > lj - EPS
+                        } else {
+                            o.t0 < EPS
+                        };
+                        let (k, m) = (root[i].unwrap(), root[neighbour].unwrap());
+                        let plain = |k: usize| {
+                            spec.flanges.iter().any(|f| f.id == folds[k].flange) && !has_lip(k)
+                        };
+                        if !full || dot(u, uj).abs() > EPS || !plain(k) || !plain(m) {
+                            return unsupported(
+                                "a short remnant next to a flange on the neighbouring edge",
+                            );
+                        }
+                        // Where a line along this edge through `x` meets the
+                        // neighbour's bend start line.
+                        let onto = |x: P2| {
+                            add(x, scale(u, (o.setback - dot(sub(x, aj), nj)) / dot(u, nj)))
+                        };
+                        let end_t = if side == 0 { st.t0 } else { st.t1 };
+                        // How far past `x` toward the corner the neighbour's
+                        // bend starts: this strip's end must stay clear of it.
+                        let past =
+                            |x: P2| dot(sub(onto(x), x), u) * if side == 0 { -1.0 } else { 1.0 };
+                        if m < k {
+                            // Built first, the neighbour keeps its corner as
+                            // next to a flange with other settings: its bend
+                            // ends where both bend start lines cross, its
+                            // flange at the vertex. This strip ends square,
+                            // the base along its bend start line, no notch.
+                            let q = onto(at(i, end_t, st.setback));
+                            if past(at(i, end_t, st.setback)) < -EPS {
+                                return unsupported(
+                                    "its end reaching into the neighbouring flange's bend",
+                                );
+                            }
+                            sides[neighbour][1 - side] = End::Corner {
+                                bend: dot(sub(q, aj), uj),
+                                flange: if side == 0 { lj } else { 0.0 },
+                                slope: 0.0,
+                                short: None,
+                                shape: CornerShape::TrimToBend,
+                                run_on: RunOn::No,
+                                turn: (q, q, q),
+                                miter: None,
+                            };
+                            sides[i][side] = End::Open { bend: end_t };
+                            continue;
+                        }
+                        // Built later, it is cut back to the notch's bottom
+                        // line, which runs on to its bend start.
+                        p = onto(from);
+                        // A round relief's quarter circle too.
+                        let clear = if round { relief.width / 2.0 } else { 0.0 };
+                        if past(from) < clear - EPS {
+                            return unsupported(
+                                "its notch reaching into the neighbouring flange's bend",
+                            );
+                        }
+                        let t = dot(sub(p, aj), uj);
+                        let other = strips[neighbour].as_mut().unwrap();
+                        if side == 0 {
+                            other.t1 = t;
+                        } else {
+                            other.t0 = t;
+                        }
+                        cut[neighbour][1 - side] = true;
                     }
                     sides[i][side] = End::RunOn {
                         corner: None,
-                        p: add(from, scale(u, w)),
-                        round: relief.shape == ReliefShape::Round,
+                        p,
+                        round,
                     };
                     continue;
                 }
@@ -1224,17 +1320,32 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         };
         crossed[j] = true;
     }
-    // Two notches running on into the same square corner cross each other
-    // there (not built).
+    // Two notches running on into the same corner: both end where their
+    // bottoms cross, whichever flange comes first (straight and tear
+    // reliefs at a square corner; a round one's run-on meets the other's
+    // quarter circle).
     for i in 0..n {
         let k = (i + 1) % n;
-        if let (End::RunOn { corner: None, .. }, End::RunOn { corner: None, .. }) =
+        let (End::RunOn { corner: None, .. }, End::RunOn { corner: None, .. }) =
             (sides[i][1], sides[k][0])
-        {
+        else {
+            continue;
+        };
+        if relief.shape == ReliefShape::Round || dot(edge(i).1, edge(k).1).abs() > EPS {
             return Err(SheetError::Unsupported(format!(
                 "flanges on edges {i} and {k}: short remnants on both sides of the corner"
             )));
         }
+        let (si, sk) = (strips[i].unwrap(), strips[k].unwrap());
+        let (a1, d1) = (at(i, si.t1, si.setback - notch_depth), edge(i).1);
+        let (a2, d2) = (at(k, sk.t0, sk.setback - notch_depth), edge(k).1);
+        let x = add(a1, scale(d1, cross2(sub(a2, a1), d2) / cross2(d1, d2)));
+        let p = End::RunOn {
+            corner: None,
+            p: x,
+            round: false,
+        };
+        (sides[i][1], sides[k][0]) = (p, p);
     }
 
     // Span of a strip's bend and of its flange along the edge.
@@ -1695,6 +1806,30 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             base_cell.line(q);
         }
         let depth = |st: &Strip| st.setback - notch_depth;
+        // From the previous strip's notch on past this vertex.
+        let prev_runs = if let (
+            Some(p),
+            End::RunOn {
+                corner,
+                p: q,
+                round,
+            },
+        ) = (strips[prev], sides[prev][1])
+        {
+            base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
+            if round {
+                quarter(&mut base_cell, prev, &p, false, corner.is_some());
+            } else {
+                base_cell.line(at(prev, p.t1, depth(&p)));
+            }
+            if let Some(c) = corner {
+                base_cell.line(c);
+            }
+            base_cell.line(q);
+            true
+        } else {
+            false
+        };
         match (strips[i], strips[prev], sides[i][0], sides[prev][1]) {
             // Along the neighbouring edge to a notch that runs on.
             (Some(st), _, End::RunOn { corner, p, round }, _) => {
@@ -1709,30 +1844,18 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 }
                 base_cell.line(at(i, span(i, &st).0[0], st.setback));
             }
-            (Some(st), _, end, _) if !matches!(end, End::Relief) => {
+            (Some(st), prev_strip, end, prev_end) if !matches!(end, End::Relief) => {
+                // A square end next to a trimmed corner: both bend starts.
+                if let (
+                    Some(p),
+                    (End::Open { .. }, End::Corner { .. }) | (End::Corner { .. }, End::Open { .. }),
+                ) = (prev_strip, (prev_end, end))
+                {
+                    base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
+                }
                 base_cell.line(at(i, span(i, &st).0[0], st.setback));
             }
-            (
-                _,
-                Some(p),
-                _,
-                End::RunOn {
-                    corner,
-                    p: q,
-                    round,
-                },
-            ) => {
-                base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
-                if round {
-                    quarter(&mut base_cell, prev, &p, false, corner.is_some());
-                } else {
-                    base_cell.line(at(prev, p.t1, depth(&p)));
-                }
-                if let Some(c) = corner {
-                    base_cell.line(c);
-                }
-                base_cell.line(q);
-            }
+            _ if prev_runs => {}
             (_, Some(p), _, end) if !matches!(end, End::Relief) => {
                 base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
             }
@@ -2335,26 +2458,60 @@ mod tests {
     }
 
     #[test]
-    fn short_remnants_on_both_sides_of_a_corner_are_refused() {
-        // Both notches run on into the corner at (0, 0) and cross there (a
-        // fuzz find: the outline lost a corner and the kernel refused the
-        // fold).
-        let part: PartSpec = serde_json::from_str(
-            r#"{ "id": "a", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
-                "relief": { "width": 2, "depth": 1, "minimum_remnant": 4 },
-                "base": { "outline": [[0,0],[70,0],[70,40],[0,40]] },
-                "flanges": [{ "id": "f0", "on": { "base": 0 }, "width": { "offset_start": 5, "offset_end": 10 },
-                              "angle": 90, "length": 20, "datum": "outer", "position": "outside", "side": "up" },
-                            { "id": "f3", "on": { "base": 3 }, "width": { "offset_start": 10, "offset_end": 5 },
-                              "angle": 90, "length": 20, "datum": "outer", "position": "outside", "side": "up" }] }"#,
-        )
-        .unwrap();
+    fn short_remnants_on_both_sides_of_a_corner_cross() {
+        // Both notches run on into the corner at (0, 0): their bottoms (3
+        // inside both edges) end where they cross, in either order (a fuzz
+        // find, once refused). A round relief's run-on meets the other's
+        // quarter circle instead (not built).
+        let part = |relief: &str, flipped: bool| -> PartSpec {
+            let (f0, f3) = (
+                r#"{ "id": "f0", "on": { "base": 0 }, "width": { "offset_start": 5, "offset_end": 10 },
+                     "angle": 90, "length": 20, "datum": "outer", "position": "outside", "side": "up" }"#,
+                r#"{ "id": "f3", "on": { "base": 3 }, "width": { "offset_start": 10, "offset_end": 5 },
+                     "angle": 90, "length": 20, "datum": "outer", "position": "outside", "side": "up" }"#,
+            );
+            let flanges = if flipped { [f3, f0] } else { [f0, f3] };
+            serde_json::from_str(&format!(
+                r#"{{ "id": "a", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "relief": {{ "shape": "{relief}", "width": 2, "depth": 1, "minimum_remnant": 4 }},
+                "base": {{ "outline": [[0,0],[70,0],[70,40],[0,40]] }},
+                "flanges": [{}, {}] }}"#,
+                flanges[0], flanges[1]
+            ))
+            .unwrap()
+        };
+        let flat = flat_pattern(&part("straight", false)).unwrap();
+        assert!(flat.outline.iter().any(|p| dist(*p, [3.0, 3.0]) < 1e-9));
+        let flipped = flat_pattern(&part("straight", true)).unwrap();
+        assert!((flat.area() - flipped.area()).abs() < 1e-9);
         assert_eq!(
-            flat_pattern(&part).unwrap_err(),
+            flat_pattern(&part("round", false)).unwrap_err(),
             SheetError::Unsupported(
                 "flanges on edges 3 and 0: short remnants on both sides of the corner".into()
             )
         );
+    }
+
+    #[test]
+    fn a_short_remnant_next_to_a_flange_follows_the_build_order() {
+        // f on edge 2 ends 3 from the corner (100, 60), g runs along edge 1
+        // (remnant-next-flange and -rev). g built first keeps its
+        // corner: its bend stops at f's bend start line (y 58), f ends
+        // square with no notch. Built later, g is cut back to f's notch
+        // bottom (y 57).
+        let f = Flange {
+            width: Some(Width {
+                offset_start: 3.0,
+                offset_end: 30.0,
+            }),
+            ..flange(2)
+        };
+        let g = flange(1);
+        let later = flat_pattern(&plate(vec![f.clone(), g.clone()])).unwrap();
+        let first = flat_pattern(&plate(vec![g, f])).unwrap();
+        assert!(has(&later.outline, [97.0, 57.0]) && !has(&later.outline, [97.0, 58.0]));
+        assert!(has(&first.outline, [97.0, 58.0]) && !has(&first.outline, [97.0, 57.0]));
+        assert!(first.area() > later.area());
     }
 
     #[test]
@@ -2593,7 +2750,8 @@ mod tests {
             lip("l2", "f2", 10.0)
         ])));
         // A remnant shorter than 2T next to a relief runs the notch on to
-        // the corner; not yet where a flange sits on the other edge there.
+        // the corner, also next to a flange on the other edge; not where
+        // that flange ends past the notch's bottom short of the corner.
         let tight = Flange {
             width: Some(Width {
                 offset_start: 5.0,
@@ -2602,7 +2760,15 @@ mod tests {
             ..flange(2)
         };
         assert!(!unsupported(&plate(vec![tight.clone()])));
-        assert!(unsupported(&plate(vec![flange(1), tight])));
+        assert!(!unsupported(&plate(vec![flange(1), tight.clone()])));
+        let past = Flange {
+            width: Some(Width {
+                offset_start: 30.0,
+                offset_end: 1.0,
+            }),
+            ..flange(1)
+        };
+        assert!(unsupported(&plate(vec![past, tight])));
         // A relief notch reaching into the neighbouring flange's bend (that
         // bend starts 9.7 from the corner: inside, 135 degrees).
         let leaning = Flange {
