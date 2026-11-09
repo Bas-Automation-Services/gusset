@@ -42,6 +42,24 @@ pub struct PartSpec {
     /// Holes and cut-outs placed on a flange's face instead of in the flat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub face_cuts: Vec<FaceCuts>,
+    /// Corner seams between two flanges built as separate features (with
+    /// different settings), which otherwise meet by build order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corner_seams: Vec<CornerSeam>,
+}
+
+/// A corner seam between two flanges on neighbouring edges that differ in
+/// length, height datum or side: they meet as flanges with the same settings
+/// do, each mitered by its own bend, or overlapping.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CornerSeam {
+    pub flanges: [String; 2],
+    #[serde(default, skip_serializing_if = "Seam::is_miter")]
+    pub seam: Seam,
+    /// Default: the relief's miter gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<f64>,
 }
 
 /// Holes and cut-outs on a flange's face, cut square through it. Positions
@@ -292,6 +310,12 @@ pub enum Transition {
     /// the vertex, the flange at the vertex; the base runs along the bend
     /// start line to the neighbouring edge. Flat and folded.
     TrimToBend,
+}
+
+impl Seam {
+    fn is_miter(&self) -> bool {
+        *self == Seam::Miter
+    }
 }
 
 /// How two flanges meeting at a corner close it.

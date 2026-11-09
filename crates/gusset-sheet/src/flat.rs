@@ -1073,6 +1073,43 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     }
                     _ => false,
                 };
+            // A corner seam between flanges of separate features: they meet
+            // as alike ones do (measured on 90-degree flanges that differ in
+            // length, datum or side).
+            let seamed = match (spec_of(k), spec_of(m)) {
+                (Some(a), Some(b)) => spec
+                    .corner_seams
+                    .iter()
+                    .find(|c| c.flanges.contains(&a.id) && c.flanges.contains(&b.id))
+                    .map(|c| (c, a, b)),
+                _ => None,
+            };
+            if let Some((_, a, b)) = seamed {
+                if same {
+                    return Err(SheetError::Invalid(format!(
+                        "corner seam {} / {}: one feature, already seamed",
+                        a.id, b.id
+                    )));
+                }
+                if a.angle != 90.0
+                    || b.angle != 90.0
+                    || a.bend_radius != b.bend_radius
+                    || a.k_factor != b.k_factor
+                    || a.position != b.position
+                    || has_lip(k)
+                    || has_lip(m)
+                {
+                    return unsupported(
+                        "a corner seam but between 90-degree flanges of the same radius, K-factor and position, without lips",
+                    );
+                }
+            }
+            let seamed = seamed.map(|(c, _, _)| c);
+            let same = same || seamed.is_some();
+            let gap = seamed
+                .and_then(|c| c.gap)
+                .or(relief.miter_gap)
+                .unwrap_or(spec.thickness);
             // A lip on one of the two flanges continues its flange's corner
             // edge. Flanges alike with lips alike on both (one feature on
             // two edges, as for one flange) are mitered at the corner like a
@@ -1171,7 +1208,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             let s_end = f.s0 + f.bend_allowance;
             // The inner face, seen from above, at flat s past the bend.
             let inner = |s: f64| f.s0 + f.radius * f.angle.sin() + (s - s_end) * f.angle.cos();
-            let half_gap = relief.miter_gap.unwrap_or(spec.thickness) / 2.0;
+            let half_gap = gap / 2.0;
             let t_at = |s: f64| {
                 (half_gap - dot(sub(a, vertex), plane) - inner(s) * dot(ni, plane)) / dot(u, plane)
             };
@@ -1180,7 +1217,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             // the bends end as for a miter;
             // the overlapping flange runs on to the other's outer face, the
             // other stops the gap short of the overlapping one's inner face.
-            let seam = relief.seam.unwrap_or_default();
+            let seam = seamed.map_or(relief.seam.unwrap_or_default(), |c| c.seam);
             if seam != Seam::Miter {
                 let right = square_edges
                     && (f.angle - std::f64::consts::FRAC_PI_2).abs() < EPS
@@ -1196,10 +1233,21 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 let past = if (side == 1) == (seam == Seam::Overlap) {
                     theirs + spec.thickness
                 } else {
-                    theirs - relief.miter_gap.unwrap_or(spec.thickness)
+                    theirs - gap
                 };
                 flange = if side == 0 { -past } else { length + past };
                 slope = 0.0;
+                // A gap past the bend radius stops a flange short of its
+                // bend's end (not measured).
+                if if side == 0 {
+                    flange > bend + EPS
+                } else {
+                    flange < bend - EPS
+                } {
+                    return unsupported(
+                        "an overlapping seam whose gap stops a flange short of its bend",
+                    );
+                }
             }
             // A flange that starts short of the bend's end takes the bend
             // with it; the base keeps its corner at q.
@@ -2532,6 +2580,7 @@ mod tests {
 
             jogs: Vec::new(),
             face_cuts: Vec::new(),
+            corner_seams: Vec::new(),
         }
     }
 
@@ -2994,6 +3043,44 @@ mod tests {
             l.cells.iter().filter(|c| c.zone == Zone::Bend(0)).count(),
             2
         );
+    }
+
+    #[test]
+    fn a_corner_seam_joins_flanges_of_separate_features() {
+        // Flanges 30 (edge 1) and 20 (edge 2) long. Expected flat areas and
+        // volumes: no seam 9498.123836 / 19094.265362 (by build order),
+        // miter 9470.726866 / 19039.471423, overlap 9550.123836 /
+        // 19198.265362, reverse overlap 9510.123836 / 19118.265362.
+        let part = |seam: Option<Seam>| {
+            let mut p = plate(vec![
+                flange(1),
+                Flange {
+                    length: 20.0,
+                    ..flange(2)
+                },
+            ]);
+            p.base.holes.clear();
+            p.corner_seams = seam
+                .map(|seam| crate::spec::CornerSeam {
+                    flanges: ["f1".into(), "f2".into()],
+                    seam,
+                    gap: None,
+                })
+                .into_iter()
+                .collect();
+            p
+        };
+        for (seam, area, volume) in [
+            (None, 9498.123836, 19094.265362),
+            (Some(Seam::Miter), 9470.726866, 19039.471423),
+            (Some(Seam::Overlap), 9550.123836, 19198.265362),
+            (Some(Seam::ReverseOverlap), 9510.123836, 19118.265362),
+        ] {
+            let a = flat_pattern(&part(seam)).unwrap().area();
+            assert!((a - area).abs() < 1e-6, "{seam:?}: {a}");
+            let v = crate::fold::exact_mass(&part(seam)).unwrap().volume;
+            assert!((v - volume).abs() < 1e-6, "{seam:?}: {v}");
+        }
     }
 
     #[test]

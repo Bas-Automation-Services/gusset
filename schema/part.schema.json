@@ -29,6 +29,13 @@
         "$ref": "#/$defs/Contour"
       }
     },
+    "corner_seams": {
+      "description": "Corner seams between two flanges built as separate features (with\ndifferent settings), which otherwise meet by build order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CornerSeam"
+      }
+    },
     "face_cuts": {
       "description": "Holes and cut-outs placed on a flange's face instead of in the flat.",
       "type": "array",
@@ -379,6 +386,35 @@
       "additionalProperties": false,
       "required": [
         "shape"
+      ]
+    },
+    "CornerSeam": {
+      "description": "A corner seam between two flanges on neighbouring edges that differ in\nlength, height datum or side: they meet as flanges with the same settings\ndo, each mitered by its own bend, or overlapping.",
+      "type": "object",
+      "properties": {
+        "flanges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "gap": {
+          "description": "Default: the relief's miter gap.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "seam": {
+          "$ref": "#/$defs/Seam"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "flanges"
       ]
     },
     "CornerShape": {

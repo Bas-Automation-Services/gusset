@@ -42,6 +42,9 @@ fn spec(r: &mut Rng) -> String {
     let mut flanges = Vec::new();
     let mut hems = Vec::new();
     let mut contours = Vec::new();
+    // Corner seams between 90-degree neighbours.
+    let mut seams = Vec::new();
+    let mut last: Option<(usize, f64, &str)> = None;
     for e in 0..n {
         if r.chance(0.45) {
             let width = if r.chance(0.3) {
@@ -60,17 +63,29 @@ fn spec(r: &mut Rng) -> String {
             } else {
                 String::new()
             };
+            // Some flanges are 90 degrees; two such neighbours may share a seam.
+            let square = r.chance(0.3);
+            let angle = if square {
+                90.0
+            } else if safe() {
+                r.range(30.0, 120.0)
+            } else {
+                r.range(20.0, 160.0)
+            };
+            let mut position = r.pick(&["inside", "outside"]);
+            if let Some((p, _, pos)) = last.filter(|l| square && l.0 + 1 == e && l.1 == 90.0) {
+                position = pos;
+                seams.push(format!(
+                    r#"{{ "flanges": ["f{p}", "f{e}"], "seam": "{}" }}"#,
+                    r.pick(&["miter", "overlap", "reverse_overlap"])
+                ));
+            }
+            last = Some((e, angle, position));
             flanges.push(format!(
-                r#"{{ "id": "f{e}", "on": {{ "base": {e} }}, {width} "angle": {}, "length": {},
-                     "datum": "{}", "position": "{}", "side": "{}" {tips} }}"#,
-                if safe() {
-                    r.range(30.0, 120.0)
-                } else {
-                    r.range(20.0, 160.0)
-                },
+                r#"{{ "id": "f{e}", "on": {{ "base": {e} }}, {width} "angle": {angle}, "length": {},
+                     "datum": "{}", "position": "{position}", "side": "{}" {tips} }}"#,
                 r.range(8.0, 40.0),
                 r.pick(&["outer", "inner", "tangent", "outer_ortho", "inner_ortho"]),
-                r.pick(&["inside", "outside"]),
                 r.pick(&["up", "down"]),
             ));
             if r.chance(0.25) {
@@ -134,12 +149,13 @@ fn spec(r: &mut Rng) -> String {
     format!(
         r#"{{ "id": "fuzz", "thickness": {t}, "bend_radius": {rad}, "k_factor": {}, {relief}
              "base": {{ "outline": {outline}, "holes": [{}] }},
-             "flanges": [{}], "hems": [{}], "contours": [{}] }}"#,
+             "flanges": [{}], "hems": [{}], "contours": [{}], "corner_seams": [{}] }}"#,
         r.range(0.25, 0.5),
         holes.join(","),
         flanges.join(","),
         hems.join(","),
-        contours.join(",")
+        contours.join(","),
+        seams.join(",")
     )
 }
 
