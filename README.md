@@ -7,6 +7,8 @@ flat pattern and its measurements, as STEP, DXF, SVG, a mesh or numbers.
 Gusset is exact: the folded solid is an analytic B-rep, its mass properties are integrated, not
 meshed. What it doesn't build yet it refuses with a clear message; it never approximates.
 
+Made by [Bas Automation Services](https://www.basautomationservices.com).
+
 ## What it builds
 
 - **Base plates** of lines and arcs (rounded corners), or a **profile** run along a width
