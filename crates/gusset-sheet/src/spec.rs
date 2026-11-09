@@ -502,6 +502,9 @@ pub struct Emboss {
     pub radius: Option<f64>,
     /// `up`: out of the plate's top face (+z); `down`: out of its bottom.
     pub side: Side,
+    /// A rectangle's turn, counter-clockwise, degrees.
+    #[serde(default)]
+    pub angle: f64,
 }
 
 /// An emboss's raised face, measured where the wall meets it (its mold
@@ -509,7 +512,17 @@ pub struct Emboss {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbossShape {
-    Round { diameter: f64 },
+    Round {
+        diameter: f64,
+    },
+    /// `width` along x, `length` along y (before the turn), corners rounded
+    /// in plan with `corner_radius`, which must be large enough for the
+    /// section to turn round them.
+    Rectangle {
+        width: f64,
+        length: f64,
+        corner_radius: f64,
+    },
 }
 
 /// A punch: holes and cut-outs drawn around (0, 0), stamped in the flat

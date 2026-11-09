@@ -614,10 +614,30 @@ impl<'a> Model<'a> {
                 edges.insert((k, level), e);
             }
         }
+        // Rectangular embosses' footprints: no walls there, the formed sheet
+        // goes on from their edges. Each one's ring point ids and flat edges.
+        let footprints: Vec<(usize, Vec<usize>, Vec<EdgeKey>)> = self
+            .layout
+            .embosses
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.hole().is_none())
+            .map(|(i, e)| {
+                let ring = e.ring();
+                let n = ring.points.len();
+                let pids: Vec<usize> = ring.points.iter().map(|&p| ids[&key(p)]).collect();
+                let keys = (0..n)
+                    .map(|j| ek(pids[j], pids[(j + 1) % n], ring.arcs[j]))
+                    .collect();
+                (i, pids, keys)
+            })
+            .collect();
+        let on_footprint = |k: &EdgeKey| footprints.iter().any(|f| f.2.contains(k));
         // Vertical edges at outline vertices (straight, radial in a bend).
         let mut vertical: HashMap<usize, Edge> = HashMap::new();
-        for (&(lo, hi, _), &(count, _, _, _)) in &uses {
-            if count == 1 {
+        for (k, &(count, _, _, _)) in &uses {
+            let &(lo, hi, _) = k;
+            if count == 1 && !on_footprint(k) {
                 for v in [lo, hi] {
                     vertical.entry(v).or_insert_with(|| {
                         let (p, zone) = points[v];
@@ -668,7 +688,7 @@ impl<'a> Model<'a> {
                     .layout
                     .embosses
                     .iter()
-                    .position(|e| e.center == h.center && 2.0 * e.footprint == h.diameter);
+                    .position(|e| e.hole().as_ref() == Some(h));
                 let seam = match formed {
                     Some(_) => u32::MAX,
                     None => b.edge(
@@ -775,7 +795,7 @@ impl<'a> Model<'a> {
         let mut side = 0;
         let mut outline: Vec<_> = uses
             .iter()
-            .filter(|(_, e)| e.0 == 1)
+            .filter(|(k, e)| e.0 == 1 && !on_footprint(k))
             .map(|(k, e)| (e.1, e.2, *k))
             .collect();
         outline.sort();
@@ -972,7 +992,7 @@ impl<'a> Model<'a> {
         // Hole walls: UV = (circle parameter, height), seam at parameter 0.
         for (k, h) in holes.iter().enumerate() {
             if let Some(e) = h.formed {
-                self.layout.embosses[e].build(&mut b, h.circles, h.v)?;
+                self.layout.embosses[e].build_round(&mut b, h.circles, h.v)?;
                 continue;
             }
             let face = b.face(
@@ -1013,6 +1033,17 @@ impl<'a> Model<'a> {
             b.set_face_sense(face, Orientation::Reverse)?;
         }
 
+        for (i, pids, keys) in &footprints {
+            let vertices =
+                std::array::from_fn(|level| std::array::from_fn(|j| vertex[pids[j]][level]));
+            let rings = std::array::from_fn(|level| {
+                std::array::from_fn(|j| {
+                    let e = edges[&(keys[j], level)];
+                    (e.id, e.start)
+                })
+            });
+            self.layout.embosses[*i].build_rect(&mut b, vertices, rings)?;
+        }
         Ok(b.finish_solid()?)
     }
 
@@ -1577,9 +1608,19 @@ impl Model<'_> {
         let mut pieces: Vec<(usize, Piece, u8)> = Vec::new();
         let mut count: HashMap<PieceKey, usize> = HashMap::new();
         for (c, cell) in self.layout.cells.iter().enumerate() {
-            let rings = std::iter::once((&cell.polygon, &cell.arcs))
-                .chain(cell.inner.iter().map(|r| (&r.points, &r.arcs)));
-            for (polygon, arcs) in rings {
+            // A rectangular emboss's footprint is no wall either.
+            let footprint = |r: &crate::flat::Ring| {
+                self.layout
+                    .embosses
+                    .iter()
+                    .any(|e| e.hole().is_none() && r.points.contains(&e.ring().points[0]))
+            };
+            let rings = std::iter::once((&cell.polygon, &cell.arcs, false)).chain(
+                cell.inner
+                    .iter()
+                    .map(|r| (&r.points, &r.arcs, footprint(r))),
+            );
+            for (polygon, arcs, footprint) in rings {
                 let n = polygon.len();
                 for k in 0..n {
                     let (p, q) = (polygon[k], polygon[(k + 1) % n]);
@@ -1593,7 +1634,7 @@ impl Model<'_> {
                         Some(Curve::Cut(c)) => Piece::Cut(c, c.s_of(p), c.s_of(q)),
                     };
                     *count.entry(piece_key(&piece)).or_default() += 1;
-                    pieces.push((c, piece, 0));
+                    pieces.push((c, piece, if footprint { 2 } else { 0 }));
                 }
             }
             for h in &cell.holes {
@@ -1601,7 +1642,7 @@ impl Model<'_> {
                     .layout
                     .embosses
                     .iter()
-                    .any(|e| e.center == h.center && 2.0 * e.footprint == h.diameter);
+                    .any(|e| e.hole().as_ref() == Some(h));
                 // Clockwise: the hole is not material.
                 let piece = Piece::Arc(h.center, h.diameter / 2.0, 0.0, -TAU);
                 pieces.push((c, piece, if footprint { 2 } else { 1 }));

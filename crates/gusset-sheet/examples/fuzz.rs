@@ -309,7 +309,8 @@ fn cone_part(r: &mut Rng) -> String {
     )
 }
 
-/// A plate with a few round embosses that mostly fit, some next to a flange.
+/// A plate with a few round or rectangular embosses that mostly fit, some
+/// next to a flange.
 fn emboss_part(r: &mut Rng) -> String {
     let t = [1.0, 1.5, 2.0, 3.0][(r.next() * 4.0) as usize % 4];
     let (w, h) = (r.range(60.0, 200.0), r.range(40.0, 150.0));
@@ -326,20 +327,39 @@ fn emboss_part(r: &mut Rng) -> String {
             let half = (radius + t) * (1.0 + k) + r.range(0.1, 20.0);
             let height = (2.0 * radius + t) * k * draft.to_radians().cos() + r.range(0.1, 15.0);
             let foot = half + height * draft.to_radians().tan() + radius * k;
+            // Half a rectangle's side or a circle's radius, and its corners.
+            let rect = r.chance(0.5);
+            let (hw, hl, rc) = if rect {
+                let rc = half + r.range(0.0, 5.0);
+                (rc + r.range(0.1, 25.0), rc + r.range(0.1, 25.0), rc)
+            } else {
+                (half, half, half)
+            };
+            let reach = hw.max(hl) + foot - half;
             let place = |r: &mut Rng, size: f64| {
-                if size > 2.0 * foot + 2.0 {
-                    r.range(foot + 1.0, size - foot - 1.0)
+                if size > 2.0 * reach + 2.0 {
+                    r.range(reach + 1.0, size - reach - 1.0)
                 } else {
                     r.range(0.0, size)
                 }
             };
+            let shape = if rect {
+                format!(
+                    r#"{{"rectangle": {{"width": {}, "length": {}, "corner_radius": {rc}}}}}"#,
+                    2.0 * hw,
+                    2.0 * hl
+                )
+            } else {
+                format!(r#"{{"round": {{"diameter": {}}}}}"#, 2.0 * half)
+            };
             format!(
-                r#"{{"id": "e{i}", "at": [{}, {}], "shape": {{"round": {{"diameter": {}}}}},
-                "height": {height}, "draft": {draft}, "radius": {radius}, "side": "{}"}}"#,
+                r#"{{"id": "e{i}", "at": [{}, {}], "shape": {shape},
+                "height": {height}, "draft": {draft}, "radius": {radius}, "side": "{}",
+                "angle": {}}}"#,
                 place(r, w),
                 place(r, h),
-                2.0 * half,
                 r.pick(&["up", "down"]),
+                r.range(0.0, 90.0),
             )
         })
         .collect();

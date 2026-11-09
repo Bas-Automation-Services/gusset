@@ -581,6 +581,12 @@
       "description": "An emboss: the sheet pressed out of the base plate at its thickness,\naround a centre in the flat pattern. Seen from the side it rises out of\nthe plate through a rounded corner, along a straight wall, and over a\nsecond rounded corner into its raised face, `height` above the plate's\nface on that side. Both corners have `radius` on their inside. The flat\npattern keeps the plate whole (the emboss stretches it) and marks the\nfootprint, where the sheet leaves the plate.",
       "type": "object",
       "properties": {
+        "angle": {
+          "description": "A rectangle's turn, counter-clockwise, degrees.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
         "at": {
           "description": "The centre, in the flat pattern.",
           "type": "array",
@@ -651,6 +657,38 @@
           "additionalProperties": false,
           "required": [
             "round"
+          ]
+        },
+        {
+          "description": "`width` along x, `length` along y (before the turn), corners rounded\nin plan with `corner_radius`, which must be large enough for the\nsection to turn round them.",
+          "type": "object",
+          "properties": {
+            "rectangle": {
+              "type": "object",
+              "properties": {
+                "corner_radius": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "length": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "width": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "width",
+                "length",
+                "corner_radius"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rectangle"
           ]
         }
       ]

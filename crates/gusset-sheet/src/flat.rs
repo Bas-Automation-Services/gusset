@@ -2520,7 +2520,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 .map(|e| FlatForm {
                     id: e.id.clone(),
                     center: e.center,
-                    outline: e.outline(),
+                    outline: e.ring(),
                 })
                 .collect(),
         },
@@ -2558,31 +2558,44 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         }
     });
     layout.flat.cutouts.extend(notches);
-    // An emboss's footprint goes into the cells as a hole: the formed sheet
-    // starts at its edge.
-    let footprints: Vec<Hole> = layout
+    // An emboss's footprint goes into the cells (round ones as holes): the
+    // formed sheet starts at its edge.
+    let discs: Vec<Hole> = layout.embosses.iter().filter_map(|e| e.hole()).collect();
+    for (e, h) in layout
         .embosses
         .iter()
-        .map(|e| Hole {
-            center: e.center,
-            diameter: 2.0 * e.footprint,
-        })
-        .collect();
-    for (e, h) in layout.embosses.iter().zip(&footprints) {
-        if crate::cut::crosses_outline(&layout.flat, h) {
+        .filter_map(|e| e.hole().map(|h| (e, h)))
+    {
+        if crate::cut::crosses_outline(&layout.flat, &h) {
             return Err(SheetError::Invalid(format!(
                 "emboss {}: its footprint crosses the outline",
                 e.id
             )));
         }
     }
-    crate::cut::cut_holes(&mut layout, &[inside.clone(), footprints.clone()].concat())?;
+    crate::cut::cut_holes(&mut layout, &[inside.clone(), discs.clone()].concat())?;
     crate::cut::cut_cutouts(&mut layout)?;
-    for (e, h) in layout.embosses.iter().zip(&footprints) {
-        let held = layout
-            .cells
-            .iter()
-            .any(|c| c.zone == Zone::Base && c.holes.contains(h));
+    let rings: Vec<(String, Ring)> = layout
+        .embosses
+        .iter()
+        .filter(|e| e.hole().is_none())
+        .map(|e| (e.id.clone(), e.ring()))
+        .collect();
+    for (k, (id, ring)) in rings.iter().enumerate() {
+        let others: Vec<Ring> = rings[..k].iter().map(|r| r.1.clone()).collect();
+        crate::cut::cut_inner(&mut layout, ring, &discs, &others, &format!("emboss {id}"))?;
+    }
+    for e in &layout.embosses {
+        let held = layout.cells.iter().any(|c| {
+            c.zone == Zone::Base
+                && match e.hole() {
+                    Some(h) => c.holes.contains(&h),
+                    None => c
+                        .inner
+                        .iter()
+                        .any(|r| r.points.contains(&e.ring().points[0])),
+                }
+        });
         if !held {
             return Err(SheetError::Unsupported(format!(
                 "emboss {}: only on the base plate, clear of bends and cut-outs",

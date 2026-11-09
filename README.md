@@ -35,9 +35,9 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   along its edge and up from the mold line.
 - **Punches:** a shape of holes and cut-outs stamped at several points, turned by an angle;
   the flat pattern marks each stamp's centre and punch ID.
-- **Embosses:** round embosses and dimples pressed out of the base plate, up or down, at the
-  sheet's thickness: a drafted or straight wall between two rounded corners, exact (tori,
-  cones); the flat pattern marks the footprint.
+- **Embosses:** round or rectangular embosses (dimples, ribs, pads) pressed out of the base
+  plate, up or down, at the sheet's thickness: a drafted or straight wall between two rounded
+  corners, exact (tori, cones, cylinders); the flat pattern marks the footprint.
 - **Bend order:** every bend numbered in the order it's made (outermost first, or as you
   list them), with a note at each bend line in the flat DXF and SVG.
 - **Unfolding** by K-factor (per part or per feature) or by a bend table (DIN 6935 style: bend deduction by radius and angle).

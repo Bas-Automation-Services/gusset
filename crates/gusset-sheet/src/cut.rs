@@ -565,6 +565,53 @@ pub(crate) fn cut_cutouts(layout: &mut Layout) -> Result<(), SheetError> {
     Ok(())
 }
 
+/// Cuts a closed ring out of the cells only (an emboss's footprint: the flat
+/// pattern stays whole), clear of the outline, holes, cut-outs, `discs` and
+/// `rings`.
+pub(crate) fn cut_inner(
+    layout: &mut Layout,
+    ring: &Ring,
+    discs: &[Hole],
+    rings: &[Ring],
+    what: &str,
+) -> Result<(), SheetError> {
+    let invalid = |m: &str| Err(SheetError::Invalid(format!("{what}: {m}")));
+    let clip = Clip::Profile(ring.clone());
+    let outline = Ring {
+        points: layout.flat.outline.clone(),
+        arcs: layout.flat.outline_arcs.clone(),
+    };
+    if touches(&clip, &outline) {
+        return invalid("crosses the outline");
+    }
+    if !inside(ring.points[0], &outline.points, &outline.arcs) {
+        return invalid("lies outside the part");
+    }
+    for h in layout.flat.holes.iter().chain(discs) {
+        let disc = Clip::Disc {
+            c: h.center,
+            r: h.diameter / 2.0,
+        };
+        if touches(&disc, ring) || clip.contains(h.center) {
+            return invalid("overlaps a hole or a round emboss");
+        }
+    }
+    for other in layout.flat.cutouts.iter().chain(rings) {
+        if touches(&clip, other)
+            || clip.contains(other.points[0])
+            || Clip::Profile(other.clone()).contains(ring.points[0])
+        {
+            return invalid("overlaps a cut-out or another emboss");
+        }
+    }
+    let mut cells = Vec::new();
+    for cell in layout.cells.drain(..) {
+        cells.extend(cut(cell, &clip, false, what)?);
+    }
+    layout.cells = cells;
+    Ok(())
+}
+
 /// Whether a ring meets the clip's boundary, or starts inside it (arcs of
 /// the ring checked at points along them).
 fn touches(clip: &Clip, ring: &Ring) -> bool {
