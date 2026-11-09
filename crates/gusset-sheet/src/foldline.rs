@@ -144,6 +144,7 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         for strip in &strips {
             bends.push(FlatBend {
                 flange: f.flange.clone(),
+                order: 0,
                 line: chord(&strip.0, f, f.s0 + f.bend_allowance / 2.0),
                 angle: f.angle.to_degrees(),
                 inner_radius: f.radius,

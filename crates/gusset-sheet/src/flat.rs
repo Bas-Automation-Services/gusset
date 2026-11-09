@@ -23,6 +23,17 @@ pub struct FlatPattern {
     /// Cut-outs, counter-clockwise.
     pub cutouts: Vec<Ring>,
     pub bends: Vec<FlatBend>,
+    /// Every punch stamp, in spec order.
+    pub punches: Vec<FlatPunch>,
+}
+
+/// Where a punch stamps the flat pattern.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlatPunch {
+    pub id: String,
+    pub center: P2,
+    /// Degrees, counter-clockwise.
+    pub angle: f64,
 }
 
 /// A closed boundary of lines and arcs: `arcs[k]` is the segment starting at
@@ -308,6 +319,8 @@ pub fn path_area(pts: &[P2], arcs: &[Option<Curve>]) -> f64 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlatBend {
     pub flange: String,
+    /// When this bend is made, from 1. The pieces of one fold line share it.
+    pub order: usize,
     /// Bend centre line across the flange width.
     pub line: [P2; 2],
     pub angle: f64,
@@ -315,6 +328,40 @@ pub struct FlatBend {
     pub k_factor: f64,
     /// Bends toward +z (the base's top face).
     pub up: bool,
+}
+
+impl FlatBend {
+    /// The bend's note: order, direction, angle and inner radius, as
+    /// "2 UP 90° R2".
+    pub fn note(&self) -> String {
+        let short = |v: f64| {
+            let s = format!("{v:.2}");
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
+        format!(
+            "{} {} {}° R{}",
+            self.order,
+            if self.up { "UP" } else { "DOWN" },
+            short(self.angle),
+            short(self.inner_radius)
+        )
+    }
+
+    /// Where a note reads along the bend line: its midpoint, a distance d to
+    /// the left of the line as it reads, and the reading direction in degrees
+    /// (-90, 90].
+    pub fn note_place(&self, d: f64) -> (P2, f64) {
+        let [a, b] = self.line;
+        let mut angle = (b[1] - a[1]).atan2(b[0] - a[0]).to_degrees();
+        if angle > 90.0 + 1e-9 {
+            angle -= 180.0;
+        } else if angle <= -90.0 + 1e-9 {
+            angle += 180.0;
+        }
+        let (s, c) = angle.to_radians().sin_cos();
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        ([mid[0] - s * d, mid[1] + c * d], angle)
+    }
 }
 
 /// What a base edge carries: one flange strip, possibly with lips on it.
@@ -662,6 +709,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         let centre = start + step.setback + step.bend_allowance / 2.0;
         bends.push(FlatBend {
             flange: step.id.clone(),
+            order: 0,
             line: [at(i, strip.t0, centre), at(i, strip.t1, centre)],
             angle: step.angle,
             inner_radius: step.radius,
@@ -1534,6 +1582,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             holes: Vec::new(),
             cutouts: Vec::new(),
             bends: Vec::new(),
+            punches: Vec::new(),
         },
         cells: Vec::new(),
         folds: folds.clone(),
@@ -2347,6 +2396,25 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     // face is flat from there to the next bend).
     let mut holes = spec.base.holes.clone();
     let mut cutouts: Vec<Ring> = spec.base.cutouts.iter().map(Ring::from_cutout).collect();
+    let mut punches = Vec::new();
+    for p in &spec.base.punches {
+        if p.at.is_empty() || p.holes.is_empty() && p.cutouts.is_empty() {
+            return Err(SheetError::Invalid(format!(
+                "punch {}: needs a shape and a place",
+                p.id
+            )));
+        }
+        for &at in &p.at {
+            let (h, k) = p.stamped(at);
+            holes.extend(h);
+            cutouts.extend(k.iter().map(Ring::from_cutout));
+            punches.push(FlatPunch {
+                id: p.id.clone(),
+                center: at,
+                angle: p.angle,
+            });
+        }
+    }
     for fc in &spec.face_cuts {
         let mut on = folds.iter().enumerate().filter(|(_, f)| f.flange == fc.on);
         let (Some((k, f)), None, true) = (
@@ -2424,6 +2492,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             holes: holes.clone(),
             cutouts,
             bends,
+            punches,
         },
         cells,
         folds,
@@ -2470,7 +2539,46 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     for c in &mut layout.cells {
         simplify(&mut c.polygon, &mut c.arcs, false);
     }
+    number_bends(&spec.bend_order, &mut layout)?;
     Ok(layout)
+}
+
+/// Numbers the bends in the order they're made: `first` in its order, then
+/// the bends furthest from the base, then as the flat pattern lists them.
+fn number_bends(first: &[String], layout: &mut Layout) -> Result<(), SheetError> {
+    let depth = |name: &str| {
+        let mut fold = layout.folds.iter().position(|f| f.flange == name);
+        let mut d = 0;
+        while let Some(i) = fold {
+            d += 1;
+            fold = layout.folds[i].parent;
+        }
+        d
+    };
+    let mut names: Vec<&str> = Vec::new();
+    for b in &layout.flat.bends {
+        if !names.contains(&b.flange.as_str()) {
+            names.push(&b.flange);
+        }
+    }
+    names.sort_by_key(|n| std::cmp::Reverse(depth(n)));
+    for (k, name) in first.iter().enumerate() {
+        if first[..k].contains(name) {
+            return Err(SheetError::Invalid(format!(
+                "bend_order lists {name} twice"
+            )));
+        }
+        let Some(i) = names.iter().position(|n| n == name) else {
+            return Err(SheetError::Invalid(format!("bend_order: no bend {name}")));
+        };
+        let n = names.remove(i);
+        names.insert(k, n);
+    }
+    let names: Vec<String> = names.into_iter().map(String::from).collect();
+    for b in &mut layout.flat.bends {
+        b.order = 1 + names.iter().position(|n| *n == b.flange).unwrap();
+    }
+    Ok(())
 }
 
 impl FlatPattern {
@@ -2597,6 +2705,7 @@ mod tests {
             jogs: Vec::new(),
             face_cuts: Vec::new(),
             corner_seams: Vec::new(),
+            bend_order: Vec::new(),
         }
     }
 
@@ -3257,5 +3366,138 @@ mod tests {
             near_corner(10.0, 1.0, 0),
             near_corner(5.0, 10.0, 1)
         ])));
+    }
+
+    fn parsed(json: &str) -> PartSpec {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn bends_are_numbered_from_the_outside_in_unless_listed() {
+        // A hem on a flange's tip, and a fold across the base.
+        let json = |order: &str| {
+            format!(
+                r#"{{"id": "t", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [100, 0], [100, 60], [0, 60]]}},
+                "flanges": [{{"id": "f1", "on": {{"base": 2}}, "angle": 90, "length": 30,
+                    "datum": "outer", "position": "outside", "side": "up"}}],
+                "hems": [{{"id": "h", "on": {{"tip": "f1"}},
+                    "kind": {{"single": {{"gap": 1, "length": 8}}}}, "side": "up"}}],
+                "folds": [{{"id": "x", "line": [[0, 20], [100, 20]], "angle": 45,
+                    "location": "centerline", "side": "down"}}],
+                "bend_order": {order}}}"#
+            )
+        };
+        let orders = |order: &str| {
+            let f = flat_pattern(&parsed(&json(order))).unwrap();
+            let mut o: Vec<(String, usize)> = f
+                .bends
+                .iter()
+                .map(|b| (b.flange.clone(), b.order))
+                .collect();
+            o.sort();
+            o
+        };
+        let o = |v: &[(&str, usize)]| {
+            v.iter()
+                .map(|(n, k)| (n.to_string(), *k))
+                .collect::<Vec<_>>()
+        };
+        // The hem (two folds out) first, then the flange and the fold in
+        // flat order.
+        let default = orders("[]");
+        assert_eq!(default.iter().find(|b| b.0 == "h").unwrap().1, 1);
+        assert_eq!(default.iter().map(|b| b.1).max(), Some(3));
+        assert_eq!(
+            orders(r#"["x", "f1"]"#),
+            o(&[("f1", 2), ("h", 3), ("x", 1)])
+        );
+        assert_eq!(orders(r#"["f1"]"#), o(&[("f1", 1), ("h", 2), ("x", 3)]));
+        for bad in [r#"["nope"]"#, r#"["h", "h"]"#] {
+            assert!(matches!(
+                flat_pattern(&parsed(&json(bad))),
+                Err(SheetError::Invalid(_))
+            ));
+        }
+        let f = flat_pattern(&parsed(&json("[]"))).unwrap();
+        let hem = f.bends.iter().find(|b| b.flange == "h").unwrap();
+        assert_eq!(hem.note(), "1 UP 180° R0.5");
+        let fold = f.bends.iter().find(|b| b.flange == "x").unwrap();
+        assert!(fold.note().ends_with("DOWN 45° R2"));
+    }
+
+    #[test]
+    fn the_pieces_of_one_fold_line_share_their_number() {
+        // An E: the line crosses its three prongs.
+        let f = flat_pattern(&parsed(
+            r#"{"id": "e", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+            "base": {"outline": [[0, 0], [100, 0], [100, 60], [80, 60], [80, 20], [60, 20],
+                [60, 60], [40, 60], [40, 20], [20, 20], [20, 60], [0, 60]]},
+            "folds": [{"id": "f", "line": [[100, 40], [0, 40]], "angle": 90,
+                "location": "centerline", "side": "up"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(f.bends.len(), 3);
+        assert!(f.bends.iter().all(|b| b.order == 1));
+    }
+
+    #[test]
+    fn a_note_reads_along_its_bend_left_to_right() {
+        let mut b = FlatBend {
+            flange: "f".into(),
+            order: 2,
+            line: [[100.0, 10.0], [0.0, 10.0]],
+            angle: 90.0,
+            inner_radius: 2.0,
+            k_factor: 0.4,
+            up: true,
+        };
+        assert_eq!(b.note_place(1.0), ([50.0, 11.0], 0.0));
+        b.line = [[5.0, 0.0], [5.0, 40.0]];
+        assert_eq!(b.note_place(1.0), ([4.0, 20.0], 90.0));
+    }
+
+    #[test]
+    fn a_punch_stamps_its_shape_at_every_point() {
+        // A 4 mm hole and a 10 x 4 obround beside it, turned a quarter.
+        let part = |at: &str| {
+            parsed(&format!(
+                r#"{{"id": "p", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [100, 0], [100, 60], [0, 60]],
+                    "punches": [{{"id": "P1", "at": {at}, "angle": 90,
+                        "holes": [{{"center": [0, 0], "diameter": 4}}],
+                        "cutouts": [{{"outline": [[-3, 6], [3, 6], [3, 10], [-3, 10]],
+                            "bulges": [0, 1, 0, 1]}}]}}]}}}}"#
+            ))
+        };
+        let f = flat_pattern(&part("[[20, 30], [70, 20]]")).unwrap();
+        assert_eq!(
+            f.punches
+                .iter()
+                .map(|p| (p.id.as_str(), p.center))
+                .collect::<Vec<_>>(),
+            [("P1", [20.0, 30.0]), ("P1", [70.0, 20.0])]
+        );
+        assert_eq!(
+            f.holes.iter().map(|h| h.center).collect::<Vec<_>>(),
+            [[20.0, 30.0], [70.0, 20.0]]
+        );
+        // Turned a quarter: the obround's straight side from (3 - 6, ...)
+        // lies left of the centre.
+        let first = &f.cutouts[0].points;
+        assert!(
+            (first[0][0] - 14.0).abs() < 1e-12 && (first[0][1] - 27.0).abs() < 1e-12,
+            "{first:?}"
+        );
+        let obround = 6.0 * 4.0 + std::f64::consts::PI * 4.0;
+        let hole = std::f64::consts::PI * 4.0;
+        assert!((f.area() - (6000.0 - 2.0 * (obround + hole))).abs() < 1e-9);
+        // Mass agrees with the cut flat.
+        let m = crate::fold::exact_mass(&part("[[20, 30], [70, 20]]")).unwrap();
+        assert!((m.volume - 2.0 * f.area()).abs() < 1e-9);
+        assert!(matches!(
+            flat_pattern(&part("[]")),
+            Err(SheetError::Invalid(_))
+        ));
     }
 }

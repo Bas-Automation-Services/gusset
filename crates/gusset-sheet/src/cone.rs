@@ -59,6 +59,7 @@ impl Section {
             (!spec.jogs.is_empty(), "jogs"),
             (!b.holes.is_empty() || !spec.face_cuts.is_empty(), "holes"),
             (!b.cutouts.is_empty(), "cut-outs"),
+            (!b.punches.is_empty(), "punches"),
             (spec.bend_table.is_some(), "a bend table"),
         ];
         if let Some((_, what)) = features.iter().find(|f| f.0) {
@@ -130,6 +131,7 @@ impl Section {
             holes: Vec::new(),
             cutouts: Vec::new(),
             bends: Vec::new(),
+            punches: Vec::new(),
         }
     }
 

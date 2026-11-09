@@ -6,6 +6,13 @@
     "base": {
       "$ref": "#/$defs/Base"
     },
+    "bend_order": {
+      "description": "Bends to make first, in this order, by the names the flat pattern\ngives them (a feature's id; its further bends `id.2`, `id.3`, ...). The\nrest follow in the default order: the bends furthest from the base\nfirst, then as listed in the flat pattern.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "bend_radius": {
       "description": "Inner bend radius, used by every bend.",
       "type": "number",
@@ -164,6 +171,13 @@
               "type": "null"
             }
           ]
+        },
+        "punches": {
+          "description": "Punched shapes, stamped in the flat pattern like holes and cut-outs.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Punch"
+          }
         }
       },
       "additionalProperties": false
@@ -1021,6 +1035,51 @@
         "points",
         "material",
         "width"
+      ]
+    },
+    "Punch": {
+      "description": "A punch: holes and cut-outs drawn around (0, 0), stamped in the flat\npattern at each point and turned counter-clockwise by `angle` degrees. The\nflat pattern lists every stamp (id, centre, angle) for the punch press.",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "at": {
+          "description": "The stamps' centres in the flat pattern.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "cutouts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Cutout"
+          }
+        },
+        "holes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Hole"
+          }
+        },
+        "id": {
+          "description": "The punch's ID, as the flat pattern marks it.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "at"
       ]
     },
     "Radial": {

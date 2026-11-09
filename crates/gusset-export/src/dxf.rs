@@ -1,9 +1,14 @@
 //! Flat pattern as an ASCII DXF (R12): the blank outline, holes and bend
 //! lines, on the layers sheet metal flat patterns commonly use
-//! (Outer, Inner, BendUp, BendDown). Millimetres, base frame.
+//! (Outer, Inner, BendUp, BendDown), a note at each bend (BendNotes: order,
+//! direction, angle, radius) and each punch stamp's centre and ID (Punches).
+//! Millimetres, base frame.
 
 use gusset_sheet::flat::{lines_and_arcs, FlatPattern};
 use std::fmt::Write;
+
+/// Text height of the bend notes, mm.
+const NOTE_HEIGHT: f64 = 2.5;
 
 pub fn flat_dxf(flat: &FlatPattern) -> String {
     let mut out = String::new();
@@ -33,6 +38,34 @@ pub fn flat_dxf(flat: &FlatPattern) -> String {
     for bend in &flat.bends {
         let layer = if bend.up { "BendUp" } else { "BendDown" };
         line(&mut pair, layer, bend.line[0], bend.line[1]);
+        // The note, centred just above the line.
+        let (at, angle) = bend.note_place(NOTE_HEIGHT / 2.0);
+        pair(0, "TEXT");
+        pair(8, "BendNotes");
+        pair(10, &num(at[0]));
+        pair(20, &num(at[1]));
+        pair(30, "0.0");
+        pair(40, &num(NOTE_HEIGHT));
+        pair(1, &bend.note().replace('°', "%%d"));
+        pair(50, &num(angle));
+        pair(72, "1");
+        pair(11, &num(at[0]));
+        pair(21, &num(at[1]));
+        pair(31, "0.0");
+    }
+    // Each punch stamp: a centre cross and its ID beside it.
+    for punch in &flat.punches {
+        let [x, y] = punch.center;
+        let h = NOTE_HEIGHT;
+        line(&mut pair, "Punches", [x - h, y], [x + h, y]);
+        line(&mut pair, "Punches", [x, y - h], [x, y + h]);
+        pair(0, "TEXT");
+        pair(8, "Punches");
+        pair(10, &num(x + h / 2.0));
+        pair(20, &num(y + h / 2.0));
+        pair(30, "0.0");
+        pair(40, &num(h));
+        pair(1, &punch.id);
     }
     pair(0, "ENDSEC");
     pair(0, "EOF");
@@ -114,6 +147,7 @@ mod tests {
                 let kind = match &e.specific {
                     ::dxf::entities::EntityType::Line(_) => "line",
                     ::dxf::entities::EntityType::Circle(_) => "circle",
+                    ::dxf::entities::EntityType::Text(_) => "text",
                     _ => "other",
                 };
                 (e.common.layer.clone(), kind.to_string())
@@ -129,6 +163,13 @@ mod tests {
         assert_eq!(count("Outer", "line"), 4);
         assert_eq!(count("Inner", "circle"), 1);
         assert_eq!(count("BendUp", "line"), 1);
+        assert_eq!(count("BendNotes", "text"), 1);
+        let note = drawing.entities().find_map(|e| match &e.specific {
+            ::dxf::entities::EntityType::Text(t) => Some(t.value.clone()),
+            _ => None,
+        });
+        assert_eq!(note.as_deref(), Some("1 UP 90%%d R2"));
+        assert_eq!(count("Punches", "line"), 0);
 
         // Coordinates survive exactly: the far edge sits at the flat width.
         let far = drawing.entities().find_map(|e| match &e.specific {
@@ -147,6 +188,30 @@ mod arc_tests {
     use super::*;
     use gusset_sheet::flat::flat_pattern;
     use gusset_sheet::spec::PartSpec;
+
+    #[test]
+    fn punch_stamps_are_marked_with_their_id() {
+        let spec: PartSpec = serde_json::from_str(
+            r#"{ "id": "t", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                 "base": { "outline": [[0,0],[100,0],[100,60],[0,60]],
+                           "punches": [{ "id": "R5", "at": [[20, 30], [80, 30]],
+                                         "holes": [{ "center": [0, 0], "diameter": 5 }] }] } }"#,
+        )
+        .unwrap();
+        let text = flat_dxf(&flat_pattern(&spec).unwrap());
+        let drawing = ::dxf::Drawing::load(&mut text.as_bytes()).unwrap();
+        let on = |kind: fn(&::dxf::entities::EntityType) -> bool| {
+            drawing
+                .entities()
+                .filter(|e| e.common.layer == "Punches" && kind(&e.specific))
+                .count()
+        };
+        assert_eq!(on(|e| matches!(e, ::dxf::entities::EntityType::Line(_))), 4);
+        assert_eq!(
+            on(|e| matches!(e, ::dxf::entities::EntityType::Text(t) if t.value == "R5")),
+            2
+        );
+    }
 
     #[test]
     fn round_reliefs_are_written_as_arcs() {

@@ -1,7 +1,10 @@
 //! Flat pattern as SVG, for display: the blank outline and cut-outs as paths
 //! (lines and arcs), holes as circles, bend lines solid (up) or dashed
 //! (down). Millimetres; y is flipped so the base frame's +y points up.
-//! Classes for styling: `cut`, `hole`, `bend up` / `bend down`, `clash`.
+//! Bend notes (order, direction, angle, radius) as text along the bend lines.
+//! Punch stamps as a centre cross with the punch's ID.
+//! Classes for styling: `cut`, `hole`, `bend up` / `bend down`, `bend-note`,
+//! `punch`, `punch-id`, `clash`.
 
 use gusset_sheet::flat::{lines_and_arcs, Arc, FlatPattern};
 use std::fmt::Write;
@@ -67,6 +70,39 @@ pub fn flat_svg_marked(flat: &FlatPattern, marks: &[Vec<[f64; 2]>]) -> String {
             num(-b.line[0][1]),
             num(b.line[1][0]),
             num(-b.line[1][1])
+        )
+        .unwrap();
+    }
+    // Notes scaled to the blank, so they read at any zoom of the whole.
+    let size = 0.025 * (hi[0] - lo[0]).max(hi[1] - lo[1]).max(100.0);
+    for b in &flat.bends {
+        let (at, angle) = b.note_place(size / 3.0);
+        writeln!(
+            out,
+            r#"<text class="bend-note" x="{x}" y="{y}" font-size="{}" text-anchor="middle" transform="rotate({} {x} {y})">{}</text>"#,
+            num(size),
+            num(-angle),
+            b.note(),
+            x = num(at[0]),
+            y = num(-at[1]),
+        )
+        .unwrap();
+    }
+    for p in &flat.punches {
+        let (x, y, h) = (p.center[0], -p.center[1], size / 2.0);
+        writeln!(
+            out,
+            r#"<path class="punch" d="M{} {}H{}M{} {}V{}" vector-effect="non-scaling-stroke"/><text class="punch-id" x="{}" y="{}" font-size="{}">{}</text>"#,
+            num(x - h),
+            num(y),
+            num(x + h),
+            num(x),
+            num(y - h),
+            num(y + h),
+            num(x + h / 2.0),
+            num(y - h / 2.0),
+            num(size),
+            p.id.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
         )
         .unwrap();
     }
@@ -153,6 +189,8 @@ mod tests {
         assert_eq!(svg.matches("A10 10 0 0 1").count(), 2, "{svg}");
         assert!(svg.contains(r#"<circle class="hole" cx="50" cy="-30" r="5""#));
         assert!(svg.contains(r#"class="bend down""#));
+        // Its note reads along the bend line, just above it.
+        assert!(svg.contains(r#"x="50" y="-61.0324" font-size="2.5" text-anchor="middle" transform="rotate(0 50 -61.0324)">1 DOWN 90° R2</text>"#), "{svg}");
         // The flange unfolds past y = 60: the view reaches above it.
         assert!(svg.contains("viewBox="));
     }

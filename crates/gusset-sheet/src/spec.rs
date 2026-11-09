@@ -46,6 +46,12 @@ pub struct PartSpec {
     /// different settings), which otherwise meet by build order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corner_seams: Vec<CornerSeam>,
+    /// Bends to make first, in this order, by the names the flat pattern
+    /// gives them (a feature's id; its further bends `id.2`, `id.3`, ...). The
+    /// rest follow in the default order: the bends furthest from the base
+    /// first, then as listed in the flat pattern.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bend_order: Vec<String>,
 }
 
 /// A corner seam between two flanges on neighbouring edges that differ in
@@ -464,6 +470,52 @@ pub struct Base {
     /// Cut-outs in the flat pattern, like holes but any shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cutouts: Vec<Cutout>,
+    /// Punched shapes, stamped in the flat pattern like holes and cut-outs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub punches: Vec<Punch>,
+}
+
+/// A punch: holes and cut-outs drawn around (0, 0), stamped in the flat
+/// pattern at each point and turned counter-clockwise by `angle` degrees. The
+/// flat pattern lists every stamp (id, centre, angle) for the punch press.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Punch {
+    /// The punch's ID, as the flat pattern marks it.
+    pub id: String,
+    /// The stamps' centres in the flat pattern.
+    pub at: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub angle: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Hole>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cutouts: Vec<Cutout>,
+}
+
+impl Punch {
+    /// Its holes and cut-outs at one stamp's centre.
+    pub fn stamped(&self, at: [f64; 2]) -> (Vec<Hole>, Vec<Cutout>) {
+        let (s, c) = self.angle.to_radians().sin_cos();
+        let place = |p: [f64; 2]| [at[0] + c * p[0] - s * p[1], at[1] + s * p[0] + c * p[1]];
+        let holes = self
+            .holes
+            .iter()
+            .map(|h| Hole {
+                center: place(h.center),
+                diameter: h.diameter,
+            })
+            .collect();
+        let cutouts = self
+            .cutouts
+            .iter()
+            .map(|k| Cutout {
+                outline: k.outline.iter().map(|&p| place(p)).collect(),
+                bulges: k.bulges.clone(),
+            })
+            .collect();
+        (holes, cutouts)
+    }
 }
 
 /// A part made from a profile run along a width (a contour flange as the

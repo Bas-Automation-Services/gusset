@@ -33,6 +33,10 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
 - **Holes and cut-outs** anywhere in the flat, across bends, and across the outline as
   notches, also through a mitered bend's curved end; or placed on a flange's face, measured
   along its edge and up from the mold line.
+- **Punches:** a shape of holes and cut-outs stamped at several points, turned by an angle;
+  the flat pattern marks each stamp's centre and punch ID.
+- **Bend order:** every bend numbered in the order it's made (outermost first, or as you
+  list them), with a note at each bend line in the flat DXF and SVG.
 - **Unfolding** by K-factor (per part or per feature) or by a bend table (DIN 6935 style: bend deduction by radius and angle).
 - **Shop checks:** bend radius, leg length, hole distance to bends and edges, hole size.
 - **Parts that fold into themselves** are refused, naming the features and where they meet;
@@ -63,7 +67,7 @@ Millimetres and degrees. The full description is `schema/part.schema.json`.
 | Crate | What |
 |---|---|
 | `gusset-sheet` | The kernel: `flat::flat_pattern`, `fold::fold` (an exact B-rep), `fold::exact_mass`, `check::check`, `clash::clashes` |
-| `gusset-export` | Flat pattern as DXF and SVG; the folded part as STEP AP214 |
+| `gusset-export` | Flat pattern as DXF and SVG (bend notes, punch marks); the folded part as STEP AP214 |
 | `gusset-wasm` | All of it for the browser (wasm-bindgen): flat DXF/SVG, STEP, mesh, mass, checks, clashes |
 | `gusset-capi` | A C library (`gusset.dll`): `include/gusset.h`, and `dotnet/Gusset.cs` for .NET 8 |
 

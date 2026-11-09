@@ -82,7 +82,8 @@ pub fn preview(json: &str) -> Result<Preview, JsError> {
     })
 }
 
-/// The flat blank's size (mm, along x and y) and its bends, as JSON.
+/// The flat blank's size (mm, along x and y) and its bends (feature, order,
+/// angle, inner radius, K-factor, up, length), as JSON.
 #[wasm_bindgen]
 pub fn flat(json: &str) -> Result<String, JsError> {
     let f = kernel(flat_pattern(&part(json)?))?;
@@ -93,8 +94,9 @@ pub fn flat(json: &str) -> Result<String, JsError> {
         .map(|b| {
             let d = [b.line[1][0] - b.line[0][0], b.line[1][1] - b.line[0][1]];
             format!(
-                r#"{{"feature":{},"angle":{},"inner_radius":{},"k_factor":{},"up":{},"length":{}}}"#,
+                r#"{{"feature":{},"order":{},"angle":{},"inner_radius":{},"k_factor":{},"up":{},"length":{}}}"#,
                 serde_json::to_string(&b.flange).unwrap(),
+                b.order,
                 b.angle,
                 b.inner_radius,
                 b.k_factor,
