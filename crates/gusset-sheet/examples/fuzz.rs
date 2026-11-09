@@ -241,9 +241,20 @@ fn folded_part(r: &mut Rng) -> String {
             )
         })
         .collect();
+    // Sometimes a U: a slot from the top, so line b may cross both prongs.
+    let outline = if r.chance(0.4) {
+        let (x1, x2) = (
+            r.range(10.0, w / 2.0 - 5.0),
+            r.range(w / 2.0 + 5.0, w - 10.0),
+        );
+        let ys = r.range(10.0, h - 10.0);
+        format!("[[0,0],[{w},0],[{w},{h}],[{x2},{h}],[{x2},{ys}],[{x1},{ys}],[{x1},{h}],[0,{h}]]")
+    } else {
+        format!("[[0,0],[{w},0],[{w},{h}],[0,{h}]]")
+    };
     format!(
         r#"{{ "id": "fuzz", "thickness": {t}, "bend_radius": {}, "k_factor": {}, {flange}
-             "base": {{ "outline": [[0,0],[{w},0],[{w},{h}],[0,{h}]], "holes": [{}] }},
+             "base": {{ "outline": {outline}, "holes": [{}] }},
              "folds": [{}] }}"#,
         r.range(0.5, 5.0),
         r.range(0.25, 0.5),

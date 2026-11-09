@@ -122,8 +122,10 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
                 continue;
             }
             let (below, rest) = split(&cell.polygon, &cell.arcs, f, f.s0)?;
-            for piece in below {
-                cells.push(piece_cell(&cell.name, piece, region));
+            // Several staying pieces: a U whose base turns.
+            let many = below.len() > 1;
+            for (n, piece) in below.into_iter().enumerate() {
+                cells.push(piece_cell(&label(&cell.name, n, many), piece, region));
             }
             for piece in rest {
                 let (strip, above) = split(&piece.0, &piece.1, f, f.s0 + f.bend_allowance)?;
@@ -137,36 +139,30 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
                 f.flange
             )));
         }
-        if strips.len() > 1 {
-            return unsupported(format!(
-                "fold {}: a line that crosses the base more than once",
-                f.flange
-            ));
+        // A line crossing the region more than once (a U's two prongs): a
+        // bend line per piece, all turning about the one line.
+        for strip in &strips {
+            bends.push(FlatBend {
+                flange: f.flange.clone(),
+                line: chord(&strip.0, f, f.s0 + f.bend_allowance / 2.0),
+                angle: f.angle.to_degrees(),
+                inner_radius: f.radius,
+                k_factor: f.k_factor,
+                up: f.up,
+            });
         }
-        bends.push(FlatBend {
-            flange: f.flange.clone(),
-            line: chord(&strips[0].0, f, f.s0 + f.bend_allowance / 2.0),
-            angle: f.angle.to_degrees(),
-            inner_radius: f.radius,
-            k_factor: f.k_factor,
-            up: f.up,
-        });
+        let many = strips.len() > 1;
         for (n, piece) in strips.into_iter().enumerate() {
-            let label = if n == 0 {
-                format!("{}.bend", f.flange)
-            } else {
-                format!("{}.bend.{n}", f.flange)
-            };
-            cells.push(piece_cell(&label, piece, Zone::Bend(i)));
+            let name = label(&format!("{}.bend", f.flange), n, many);
+            cells.push(piece_cell(&name, piece, Zone::Bend(i)));
         }
         let many = turns.len() > 1;
         for (n, piece) in turns.into_iter().enumerate() {
-            let label = if many {
-                format!("{}.{n}", f.flange)
-            } else {
-                f.flange.clone()
-            };
-            cells.push(piece_cell(&label, piece, Zone::Flange(i)));
+            cells.push(piece_cell(
+                &label(&f.flange, n, many),
+                piece,
+                Zone::Flange(i),
+            ));
         }
         layout.cells = cells;
     }
@@ -281,6 +277,16 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         };
     }
     Ok(())
+}
+
+/// A piece's name: numbered from 0 when there are several, as a cut-out
+/// splitting a cell names its pieces, so names never repeat.
+fn label(name: &str, n: usize, many: bool) -> String {
+    if many {
+        format!("{name}.{n}")
+    } else {
+        name.to_string()
+    }
 }
 
 fn piece_cell(name: &str, (polygon, arcs): Piece, zone: Zone) -> Cell {
@@ -663,6 +669,30 @@ mod tests {
         let m = crate::fold::exact_mass(&spec).unwrap();
         assert!((m.volume - 7825.1327).abs() < 1e-3, "{}", m.volume);
         fold(&spec).unwrap();
+    }
+
+    #[test]
+    fn a_fold_line_may_cross_the_base_more_than_once() {
+        // Across a U's two prongs: a bend in each, the tips turning or (the
+        // line reversed) the U's base turning and both tips staying.
+        // Expected: 8837.699112 mm3 either way.
+        for line in ["[[100,40],[0,40]]", "[[0,40],[100,40]]"] {
+            let spec: PartSpec = serde_json::from_str(&format!(
+                r#"{{ "id": "t", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                 "base": {{ "outline": [[0,0],[100,0],[100,60],[70,60],[70,20],[30,20],[30,60],[0,60]] }},
+                 "folds": [{{ "id": "f", "line": {line}, "angle": 90,
+                             "location": "centerline", "side": "up" }}] }}"#
+            ))
+            .unwrap();
+            assert_eq!(layout(&spec).unwrap().flat.bends.len(), 2);
+            let m = crate::fold::exact_mass(&spec).unwrap();
+            assert!(
+                (m.volume - 8837.699112).abs() < 1e-6,
+                "{line}: {}",
+                m.volume
+            );
+            fold(&spec).unwrap();
+        }
     }
 
     #[test]
