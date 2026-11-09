@@ -140,6 +140,13 @@
             "$ref": "#/$defs/Cutout"
           }
         },
+        "embosses": {
+          "description": "Formed embosses on the base plate.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Emboss"
+          }
+        },
         "holes": {
           "description": "Holes in the flat pattern (the base frame, which the flat pattern\nshares): on the base, across or inside a bend, or on a flange. Each\nmust lie inside the flat outline or cross it (a round notch), without\ntouching it, and clear of the others.",
           "type": "array",
@@ -566,6 +573,84 @@
           "additionalProperties": false,
           "required": [
             "tip"
+          ]
+        }
+      ]
+    },
+    "Emboss": {
+      "description": "An emboss: the sheet pressed out of the base plate at its thickness,\naround a centre in the flat pattern. Seen from the side it rises out of\nthe plate through a rounded corner, along a straight wall, and over a\nsecond rounded corner into its raised face, `height` above the plate's\nface on that side. Both corners have `radius` on their inside. The flat\npattern keeps the plate whole (the emboss stretches it) and marks the\nfootprint, where the sheet leaves the plate.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "The centre, in the flat pattern.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "draft": {
+          "description": "The wall's slope from square to the plate, degrees: 0 for a straight\nwall, below 90.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "height": {
+          "type": "number",
+          "format": "double"
+        },
+        "id": {
+          "type": "string"
+        },
+        "radius": {
+          "description": "Inside radius of both corners. Default: the part's bend radius.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "shape": {
+          "$ref": "#/$defs/EmbossShape"
+        },
+        "side": {
+          "description": "`up`: out of the plate's top face (+z); `down`: out of its bottom.",
+          "$ref": "#/$defs/Side"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "at",
+        "shape",
+        "height",
+        "side"
+      ]
+    },
+    "EmbossShape": {
+      "description": "An emboss's raised face, measured where the wall meets it (its mold\nline).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "round": {
+              "type": "object",
+              "properties": {
+                "diameter": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "diameter"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "round"
           ]
         }
       ]

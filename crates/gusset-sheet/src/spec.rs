@@ -473,6 +473,43 @@ pub struct Base {
     /// Punched shapes, stamped in the flat pattern like holes and cut-outs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub punches: Vec<Punch>,
+    /// Formed embosses on the base plate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embosses: Vec<Emboss>,
+}
+
+/// An emboss: the sheet pressed out of the base plate at its thickness,
+/// around a centre in the flat pattern. Seen from the side it rises out of
+/// the plate through a rounded corner, along a straight wall, and over a
+/// second rounded corner into its raised face, `height` above the plate's
+/// face on that side. Both corners have `radius` on their inside. The flat
+/// pattern keeps the plate whole (the emboss stretches it) and marks the
+/// footprint, where the sheet leaves the plate.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Emboss {
+    pub id: String,
+    /// The centre, in the flat pattern.
+    pub at: [f64; 2],
+    pub shape: EmbossShape,
+    pub height: f64,
+    /// The wall's slope from square to the plate, degrees: 0 for a straight
+    /// wall, below 90.
+    #[serde(default)]
+    pub draft: f64,
+    /// Inside radius of both corners. Default: the part's bend radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    /// `up`: out of the plate's top face (+z); `down`: out of its bottom.
+    pub side: Side,
+}
+
+/// An emboss's raised face, measured where the wall meets it (its mold
+/// line).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbossShape {
+    Round { diameter: f64 },
 }
 
 /// A punch: holes and cut-outs drawn around (0, 0), stamped in the flat

@@ -1,7 +1,8 @@
 //! Flat pattern as an ASCII DXF (R12): the blank outline, holes and bend
 //! lines, on the layers sheet metal flat patterns commonly use
 //! (Outer, Inner, BendUp, BendDown), a note at each bend (BendNotes: order,
-//! direction, angle, radius) and each punch stamp's centre and ID (Punches).
+//! direction, angle, radius), each punch stamp's centre and ID (Punches) and
+//! each emboss's footprint and id (Forms).
 //! Millimetres, base frame.
 
 use gusset_sheet::flat::{lines_and_arcs, FlatPattern};
@@ -52,6 +53,18 @@ pub fn flat_dxf(flat: &FlatPattern) -> String {
         pair(11, &num(at[0]));
         pair(21, &num(at[1]));
         pair(31, "0.0");
+    }
+    // Each emboss: its footprint and its id at the centre.
+    for form in &flat.forms {
+        let (points, arcs) = lines_and_arcs(&form.outline.points, &form.outline.arcs);
+        ring(&mut pair, "Forms", &points, &arcs);
+        pair(0, "TEXT");
+        pair(8, "Forms");
+        pair(10, &num(form.center[0]));
+        pair(20, &num(form.center[1]));
+        pair(30, "0.0");
+        pair(40, &num(NOTE_HEIGHT));
+        pair(1, &form.id);
     }
     // Each punch stamp: a centre cross and its ID beside it.
     for punch in &flat.punches {

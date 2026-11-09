@@ -5,7 +5,7 @@
 //!     cargo run --release --example fuzz -- <count> <seed>
 //!     SAFE=1 cargo run --release --example fuzz -- 1000 7   (fewer self-intersecting parts)
 //!     WHY=1 ...                                             (print each refusal and its part)
-//!     KIND=profile|fold|cone ...                            (profiles, fold lines, rolled cones)
+//!     KIND=profile|fold|cone|emboss ...                     (profiles, fold lines, rolled cones, embosses)
 //!
 //! Without SAFE many parts fold into themselves (flanges past 90 degrees into a
 //! neighbour); Gusset refuses those (`clash`).
@@ -309,6 +309,54 @@ fn cone_part(r: &mut Rng) -> String {
     )
 }
 
+/// A plate with a few round embosses that mostly fit, some next to a flange.
+fn emboss_part(r: &mut Rng) -> String {
+    let t = [1.0, 1.5, 2.0, 3.0][(r.next() * 4.0) as usize % 4];
+    let (w, h) = (r.range(60.0, 200.0), r.range(40.0, 150.0));
+    let embosses: Vec<String> = (0..1 + (r.next() * 3.0) as usize)
+        .map(|i| {
+            let draft: f64 = if r.chance(0.2) {
+                0.0
+            } else {
+                r.range(0.0, 60.0)
+            };
+            let radius = r.range(0.3, 4.0);
+            let k = ((90.0 - draft) / 2.0).to_radians().tan();
+            // Just big enough across and high enough for both corners, and more.
+            let half = (radius + t) * (1.0 + k) + r.range(0.1, 20.0);
+            let height = (2.0 * radius + t) * k * draft.to_radians().cos() + r.range(0.1, 15.0);
+            let foot = half + height * draft.to_radians().tan() + radius * k;
+            let place = |r: &mut Rng, size: f64| {
+                if size > 2.0 * foot + 2.0 {
+                    r.range(foot + 1.0, size - foot - 1.0)
+                } else {
+                    r.range(0.0, size)
+                }
+            };
+            format!(
+                r#"{{"id": "e{i}", "at": [{}, {}], "shape": {{"round": {{"diameter": {}}}}},
+                "height": {height}, "draft": {draft}, "radius": {radius}, "side": "{}"}}"#,
+                place(r, w),
+                place(r, h),
+                2.0 * half,
+                r.pick(&["up", "down"]),
+            )
+        })
+        .collect();
+    let flange = if r.chance(0.5) {
+        r#"{"id": "f", "on": {"base": 2}, "angle": 90, "length": 20, "datum": "outer",
+            "position": "outside", "side": "up"}"#
+    } else {
+        ""
+    };
+    format!(
+        r#"{{"id": "emboss", "thickness": {t}, "bend_radius": 2, "k_factor": 0.4,
+            "base": {{"outline": [[0, 0], [{w}, 0], [{w}, {h}], [0, {h}]], "embosses": [{}]}},
+            "flanges": [{flange}]}}"#,
+        embosses.join(",")
+    )
+}
+
 fn main() {
     let count: usize = std::env::args().nth(1).map_or(500, |s| s.parse().unwrap());
     let seed: u64 = std::env::args().nth(2).map_or(1, |s| s.parse().unwrap());
@@ -320,6 +368,7 @@ fn main() {
             Ok("profile") => profile_part(&mut rng),
             Ok("fold") => folded_part(&mut rng),
             Ok("cone") => cone_part(&mut rng),
+            Ok("emboss") => emboss_part(&mut rng),
             _ => spec(&mut rng),
         };
         let part: gusset_sheet::spec::PartSpec = serde_json::from_str(&json).unwrap();

@@ -60,6 +60,7 @@ impl Section {
             (!b.holes.is_empty() || !spec.face_cuts.is_empty(), "holes"),
             (!b.cutouts.is_empty(), "cut-outs"),
             (!b.punches.is_empty(), "punches"),
+            (!b.embosses.is_empty(), "embosses"),
             (spec.bend_table.is_some(), "a bend table"),
         ];
         if let Some((_, what)) = features.iter().find(|f| f.0) {
@@ -132,6 +133,7 @@ impl Section {
             cutouts: Vec::new(),
             bends: Vec::new(),
             punches: Vec::new(),
+            forms: Vec::new(),
         }
     }
 
@@ -427,6 +429,7 @@ pub(crate) fn layout(spec: &PartSpec) -> Option<Result<Layout, SheetError>> {
             cells: Vec::new(),
             folds: Vec::new(),
             holes: Vec::new(),
+            embosses: Vec::new(),
         })
     })
 }

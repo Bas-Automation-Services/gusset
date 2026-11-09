@@ -663,16 +663,26 @@ impl<'a> Model<'a> {
                         false,
                     );
                 }
-                let seam = b.edge(
-                    CurveGeometry::Line {
-                        origin: a0,
-                        direction: unit(sub(a1, a0)),
-                    },
-                    Interval::new(0.0, t).unwrap(),
-                    true,
-                );
+                // An emboss's footprint: the formed sheet takes the wall's place.
+                let formed = self
+                    .layout
+                    .embosses
+                    .iter()
+                    .position(|e| e.center == h.center && 2.0 * e.footprint == h.diameter);
+                let seam = match formed {
+                    Some(_) => u32::MAX,
+                    None => b.edge(
+                        CurveGeometry::Line {
+                            origin: a0,
+                            direction: unit(sub(a1, a0)),
+                        },
+                        Interval::new(0.0, t).unwrap(),
+                        true,
+                    ),
+                };
                 holes.push(HoleEdges {
                     cell: ci,
+                    formed,
                     seam,
                     circles,
                     v,
@@ -961,6 +971,10 @@ impl<'a> Model<'a> {
 
         // Hole walls: UV = (circle parameter, height), seam at parameter 0.
         for (k, h) in holes.iter().enumerate() {
+            if let Some(e) = h.formed {
+                self.layout.embosses[e].build(&mut b, h.circles, h.v)?;
+                continue;
+            }
             let face = b.face(
                 &format!("hole.{k}"),
                 h.wall.clone(),
@@ -1343,6 +1357,8 @@ type EdgeKey = (usize, usize, Option<(i64, i64)>);
 /// A hole held whole by a cell.
 struct HoleEdges {
     cell: usize,
+    /// The emboss whose footprint this is.
+    formed: Option<usize>,
     seam: u32,
     circles: [u32; 2],
     v: [u32; 2],
@@ -1555,9 +1571,10 @@ fn piece_key(piece: &Piece) -> PieceKey {
 impl Model<'_> {
     fn exact_mass(&self) -> Mass {
         let t = self.t;
-        // Every boundary piece with its cell and whether it is a hole held
-        // whole; a piece two cells share is no wall.
-        let mut pieces: Vec<(usize, Piece, bool)> = Vec::new();
+        // Every boundary piece with its cell and kind: 0 an edge (a wall unless
+        // two cells share it), 1 a hole held whole (a wall), 2 an emboss's
+        // footprint (no wall: the formed sheet goes on from there).
+        let mut pieces: Vec<(usize, Piece, u8)> = Vec::new();
         let mut count: HashMap<PieceKey, usize> = HashMap::new();
         for (c, cell) in self.layout.cells.iter().enumerate() {
             let rings = std::iter::once((&cell.polygon, &cell.arcs))
@@ -1576,15 +1593,22 @@ impl Model<'_> {
                         Some(Curve::Cut(c)) => Piece::Cut(c, c.s_of(p), c.s_of(q)),
                     };
                     *count.entry(piece_key(&piece)).or_default() += 1;
-                    pieces.push((c, piece, false));
+                    pieces.push((c, piece, 0));
                 }
             }
             for h in &cell.holes {
+                let footprint = self
+                    .layout
+                    .embosses
+                    .iter()
+                    .any(|e| e.center == h.center && 2.0 * e.footprint == h.diameter);
                 // Clockwise: the hole is not material.
-                pieces.push((c, Piece::Arc(h.center, h.diameter / 2.0, 0.0, -TAU), true));
+                let piece = Piece::Arc(h.center, h.diameter / 2.0, 0.0, -TAU);
+                pieces.push((c, piece, if footprint { 2 } else { 1 }));
             }
         }
-        let is_wall = |piece: &Piece, hole: bool| hole || count[&piece_key(piece)] == 1;
+        let is_wall =
+            |piece: &Piece, kind: u8| kind == 1 || kind == 0 && count[&piece_key(piece)] == 1;
 
         let (mut volume, mut area, mut moment) = (0.0, 0.0, [0.0; 3]);
         for (c, cell) in self.layout.cells.iter().enumerate() {
@@ -1667,6 +1691,15 @@ impl Model<'_> {
                         moment[j] += m.t[j] * v + local[j];
                     }
                 }
+            }
+        }
+        // The embosses (all on the base, which stays in place).
+        for e in &self.layout.embosses {
+            let m = e.mass();
+            volume += m.volume;
+            area += m.area;
+            for j in 0..3 {
+                moment[j] += m.volume * m.center_of_mass[j];
             }
         }
         Mass {

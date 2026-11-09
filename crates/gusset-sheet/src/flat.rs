@@ -25,6 +25,17 @@ pub struct FlatPattern {
     pub bends: Vec<FlatBend>,
     /// Every punch stamp, in spec order.
     pub punches: Vec<FlatPunch>,
+    /// Every emboss's footprint (where the sheet leaves the plate). Not cut:
+    /// the plate stays whole in the flat.
+    pub forms: Vec<FlatForm>,
+}
+
+/// Where a formed feature leaves the flat plate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlatForm {
+    pub id: String,
+    pub center: P2,
+    pub outline: Ring,
 }
 
 /// Where a punch stamps the flat pattern.
@@ -536,6 +547,9 @@ pub struct Layout {
     /// Every hole in the flat, in spec order: the base's, then those on
     /// flange faces.
     pub holes: Vec<Hole>,
+    /// The embosses, each held whole by a base cell as a hole the size of
+    /// its footprint.
+    pub(crate) embosses: Vec<crate::emboss::Formed>,
 }
 
 #[derive(Clone, Debug)]
@@ -1583,10 +1597,12 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             cutouts: Vec::new(),
             bends: Vec::new(),
             punches: Vec::new(),
+            forms: Vec::new(),
         },
         cells: Vec::new(),
         folds: folds.clone(),
         holes: Vec::new(),
+        embosses: Vec::new(),
     };
     let maps = crate::fold::Model::new(spec, &shape);
     // A mitered chain's end along edge i at flat s, past its first bend:
@@ -2396,6 +2412,12 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     // face is flat from there to the next bend).
     let mut holes = spec.base.holes.clone();
     let mut cutouts: Vec<Ring> = spec.base.cutouts.iter().map(Ring::from_cutout).collect();
+    let embosses = spec
+        .base
+        .embosses
+        .iter()
+        .map(|e| crate::emboss::Formed::new(e, spec.thickness, spec.bend_radius))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut punches = Vec::new();
     for p in &spec.base.punches {
         if p.at.is_empty() || p.holes.is_empty() && p.cutouts.is_empty() {
@@ -2493,10 +2515,19 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             cutouts,
             bends,
             punches,
+            forms: embosses
+                .iter()
+                .map(|e| FlatForm {
+                    id: e.id.clone(),
+                    center: e.center,
+                    outline: e.outline(),
+                })
+                .collect(),
         },
         cells,
         folds,
         holes: holes.clone(),
+        embosses,
     };
     for (clip, cells) in &corner_clips {
         crate::cut::cut_corner(&mut layout, clip, *cells)?;
@@ -2527,8 +2558,38 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         }
     });
     layout.flat.cutouts.extend(notches);
-    crate::cut::cut_holes(&mut layout, &inside)?;
+    // An emboss's footprint goes into the cells as a hole: the formed sheet
+    // starts at its edge.
+    let footprints: Vec<Hole> = layout
+        .embosses
+        .iter()
+        .map(|e| Hole {
+            center: e.center,
+            diameter: 2.0 * e.footprint,
+        })
+        .collect();
+    for (e, h) in layout.embosses.iter().zip(&footprints) {
+        if crate::cut::crosses_outline(&layout.flat, h) {
+            return Err(SheetError::Invalid(format!(
+                "emboss {}: its footprint crosses the outline",
+                e.id
+            )));
+        }
+    }
+    crate::cut::cut_holes(&mut layout, &[inside.clone(), footprints.clone()].concat())?;
     crate::cut::cut_cutouts(&mut layout)?;
+    for (e, h) in layout.embosses.iter().zip(&footprints) {
+        let held = layout
+            .cells
+            .iter()
+            .any(|c| c.zone == Zone::Base && c.holes.contains(h));
+        if !held {
+            return Err(SheetError::Unsupported(format!(
+                "emboss {}: only on the base plate, clear of bends and cut-outs",
+                e.id
+            )));
+        }
+    }
     simplify(
         &mut layout.flat.outline,
         &mut layout.flat.outline_arcs,

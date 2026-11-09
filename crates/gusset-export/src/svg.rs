@@ -2,9 +2,10 @@
 //! (lines and arcs), holes as circles, bend lines solid (up) or dashed
 //! (down). Millimetres; y is flipped so the base frame's +y points up.
 //! Bend notes (order, direction, angle, radius) as text along the bend lines.
-//! Punch stamps as a centre cross with the punch's ID.
+//! Punch stamps as a centre cross with the punch's ID; emboss footprints as
+//! outlines with their id.
 //! Classes for styling: `cut`, `hole`, `bend up` / `bend down`, `bend-note`,
-//! `punch`, `punch-id`, `clash`.
+//! `punch`, `punch-id`, `form`, `form-id`, `clash`.
 
 use gusset_sheet::flat::{lines_and_arcs, Arc, FlatPattern};
 use std::fmt::Write;
@@ -85,6 +86,19 @@ pub fn flat_svg_marked(flat: &FlatPattern, marks: &[Vec<[f64; 2]>]) -> String {
             b.note(),
             x = num(at[0]),
             y = num(-at[1]),
+        )
+        .unwrap();
+    }
+    for f in &flat.forms {
+        let (points, arcs) = lines_and_arcs(&f.outline.points, &f.outline.arcs);
+        writeln!(
+            out,
+            r#"<path class="form" d="{}" fill="none" vector-effect="non-scaling-stroke"/><text class="form-id" x="{}" y="{}" font-size="{}" text-anchor="middle">{}</text>"#,
+            ring(&points, &arcs),
+            num(f.center[0]),
+            num(-f.center[1]),
+            num(size),
+            f.id.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
         )
         .unwrap();
     }
