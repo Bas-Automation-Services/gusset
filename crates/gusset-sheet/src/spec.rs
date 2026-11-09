@@ -452,6 +452,9 @@ pub struct Base {
     /// In place of an outline: the part is a profile run along a width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
+    /// In place of an outline: the part is a rolled cone or cylinder segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cone: Option<Cone>,
     /// Holes in the flat pattern (the base frame, which the flat pattern
     /// shares): on the base, across or inside a bend, or on a flange. Each
     /// must lie inside the flat outline or cross it (a round notch), without
@@ -491,6 +494,35 @@ pub struct Profile {
     pub material: Hand,
     /// Run along +x from x = 0.
     pub width: f64,
+}
+
+/// A part rolled to a cone or cylinder segment around the z axis: the sheet
+/// between two coaxial arcs, one on z = 0 and one on z = height, both from +x
+/// counter-clockwise by `sweep` (a lofted flange between two such arcs, or a
+/// straight line rolled around an axis). The arcs lie on one face of the
+/// sheet; the sheet's ends are cut square to it, so an end of a cone is a
+/// cone too. The flat pattern is the developed neutral surface (at the
+/// K-factor): the edge from the arcs' start points runs from (0, 0) to (0, L),
+/// L the slant length, and the sheet unrolls towards +x, seen from outside.
+/// Holes and features on it aren't supported yet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Cone {
+    /// The arcs' radii: on z = 0, then on z = height. Equal for a cylinder.
+    pub radii: [f64; 2],
+    pub height: f64,
+    /// Degrees, below 360.
+    pub sweep: f64,
+    /// The side of the arcs' face the material lies on: away from the axis
+    /// or towards it.
+    pub material: Radial,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Radial {
+    Outside,
+    Inside,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

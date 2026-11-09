@@ -86,13 +86,7 @@ pub fn preview(json: &str) -> Result<Preview, JsError> {
 #[wasm_bindgen]
 pub fn flat(json: &str) -> Result<String, JsError> {
     let f = kernel(flat_pattern(&part(json)?))?;
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for p in &f.outline {
-        for j in 0..2 {
-            lo[j] = lo[j].min(p[j]);
-            hi[j] = hi[j].max(p[j]);
-        }
-    }
+    let [lo, hi] = f.bounds();
     let bends: Vec<String> = f
         .bends
         .iter()
@@ -250,6 +244,21 @@ mod tests {
         assert!(schema().contains("PartSpec"));
         assert_eq!(check(PLATE, "").unwrap(), "[]");
         assert_eq!(clashes(PLATE).unwrap(), "[]");
+    }
+
+    #[test]
+    fn a_cone_shows_its_unrolled_blank() {
+        let part = r#"{ "id": "c", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+            "base": { "cone": { "radii": [50, 30], "height": 60, "sweep": 180, "material": "outside" } } }"#;
+        let f: serde_json::Value = serde_json::from_str(&flat(part).unwrap()).unwrap();
+        // The neutral sector about the apex, 134.4976 x 107.4253.
+        let l = 20f64.hypot(60.0);
+        let outer = (50.0 + 0.8 * 60.0 / l) * l / 20.0;
+        let (inner, angle) = (outer - l, std::f64::consts::PI * 20.0 / l);
+        assert!((f["width"].as_f64().unwrap() - outer * angle.sin()).abs() < 1e-9);
+        assert!((f["height"].as_f64().unwrap() - (outer - inner * angle.cos())).abs() < 1e-9);
+        assert_eq!(f["bends"].as_array().unwrap().len(), 0);
+        assert!(!mesh(part, 0.05).unwrap().indices.is_empty());
     }
 
     #[test]

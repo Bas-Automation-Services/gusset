@@ -14,22 +14,7 @@ pub fn flat_svg(flat: &FlatPattern) -> String {
 /// itself (`gusset_sheet::clash`).
 pub fn flat_svg_marked(flat: &FlatPattern, marks: &[Vec<[f64; 2]>]) -> String {
     let (outline, outline_arcs) = lines_and_arcs(&flat.outline, &flat.outline_arcs);
-    let mut pts: Vec<[f64; 2]> = outline.clone();
-    // Arcs can bulge past their end points: take their full circles' boxes.
-    for (k, arc) in outline_arcs.iter().enumerate() {
-        if let Some(a) = arc {
-            let r = dist(outline[k], a.center);
-            pts.push([a.center[0] - r, a.center[1] - r]);
-            pts.push([a.center[0] + r, a.center[1] + r]);
-        }
-    }
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for p in &pts {
-        for j in 0..2 {
-            lo[j] = lo[j].min(p[j]);
-            hi[j] = hi[j].max(p[j]);
-        }
-    }
+    let [lo, hi] = flat.bounds();
     let margin = 0.05 * (hi[0] - lo[0]).max(hi[1] - lo[1]);
     let mut out = String::new();
     writeln!(

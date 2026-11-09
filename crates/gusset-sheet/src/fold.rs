@@ -37,6 +37,9 @@ impl From<GeometryError> for SheetError {
 }
 
 pub fn fold(spec: &PartSpec) -> Result<BrepEnvelope, SheetError> {
+    if let Some(solid) = crate::cone::fold(spec) {
+        return solid;
+    }
     let spec = &*spec.resolved()?;
     let layout = layout(spec)?;
     let model = Model::new(spec, &layout);
@@ -1441,6 +1444,9 @@ fn unit2(a: P2) -> P2 {
 /// Gauss-Legendre quadrature on pieces short enough to be exact to rounding).
 /// No mesh: use this where `mass` would need a very fine tessellation.
 pub fn exact_mass(spec: &PartSpec) -> Result<Mass, SheetError> {
+    if let Some(m) = crate::cone::mass(spec) {
+        return m;
+    }
     let spec = &*spec.resolved()?;
     let layout = layout(spec)?;
     let model = Model::new(spec, &layout);

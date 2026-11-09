@@ -2,6 +2,7 @@
 
 pub mod check;
 pub mod clash;
+mod cone;
 mod cut;
 pub mod flat;
 pub mod fold;

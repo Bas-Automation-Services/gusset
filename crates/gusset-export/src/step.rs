@@ -36,4 +36,19 @@ mod tests {
         assert!(step.contains("SI_UNIT(.MILLI.,.METRE.)"));
         assert!(step.contains("1.00000000000000000E2") && !step.contains("1.00000000000000000E5"));
     }
+
+    #[test]
+    fn a_cone_exports_with_conical_faces() {
+        let spec: PartSpec = serde_json::from_str(
+            r#"{ "id": "c", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                 "base": { "cone": { "radii": [50, 30], "height": 60, "sweep": 180,
+                                     "material": "outside" } } }"#,
+        )
+        .unwrap();
+        let step = part_step(&spec).unwrap();
+        assert_eq!(step.matches("MANIFOLD_SOLID_BREP").count(), 1);
+        // Both faces of the sheet and both ends.
+        assert_eq!(step.matches("CONICAL_SURFACE").count(), 4);
+        assert_eq!(step.matches("PLANE(").count(), 2);
+    }
 }

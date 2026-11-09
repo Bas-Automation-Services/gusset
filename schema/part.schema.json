@@ -115,6 +115,17 @@
             "format": "double"
           }
         },
+        "cone": {
+          "description": "In place of an outline: the part is a rolled cone or cylinder segment.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cone"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cutouts": {
           "description": "Cut-outs in the flat pattern, like holes but any shape.",
           "type": "array",
@@ -236,6 +247,42 @@
         "radii",
         "angles",
         "values"
+      ]
+    },
+    "Cone": {
+      "description": "A part rolled to a cone or cylinder segment around the z axis: the sheet\nbetween two coaxial arcs, one on z = 0 and one on z = height, both from +x\ncounter-clockwise by `sweep` (a lofted flange between two such arcs, or a\nstraight line rolled around an axis). The arcs lie on one face of the\nsheet; the sheet's ends are cut square to it, so an end of a cone is a\ncone too. The flat pattern is the developed neutral surface (at the\nK-factor): the edge from the arcs' start points runs from (0, 0) to (0, L),\nL the slant length, and the sheet unrolls towards +x, seen from outside.\nHoles and features on it aren't supported yet.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "type": "number",
+          "format": "double"
+        },
+        "material": {
+          "description": "The side of the arcs' face the material lies on: away from the axis\nor towards it.",
+          "$ref": "#/$defs/Radial"
+        },
+        "radii": {
+          "description": "The arcs' radii: on z = 0, then on z = height. Equal for a cylinder.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "sweep": {
+          "description": "Degrees, below 360.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "radii",
+        "height",
+        "sweep",
+        "material"
       ]
     },
     "Contour": {
@@ -974,6 +1021,13 @@
         "points",
         "material",
         "width"
+      ]
+    },
+    "Radial": {
+      "type": "string",
+      "enum": [
+        "outside",
+        "inside"
       ]
     },
     "Relief": {

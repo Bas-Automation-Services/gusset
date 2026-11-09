@@ -5,6 +5,7 @@
 //!     cargo run --release --example fuzz -- <count> <seed>
 //!     SAFE=1 cargo run --release --example fuzz -- 1000 7   (fewer self-intersecting parts)
 //!     WHY=1 ...                                             (print each refusal and its part)
+//!     KIND=profile|fold|cone ...                            (profiles, fold lines, rolled cones)
 //!
 //! Without SAFE many parts fold into themselves (flanges past 90 degrees into a
 //! neighbour); Gusset refuses those (`clash`).
@@ -283,6 +284,31 @@ fn folded_part(r: &mut Rng) -> String {
     )
 }
 
+/// A rolled cone or cylinder: radii from near the axis to wide, from a
+/// near-flat ring to a cylinder, either side of the arcs.
+fn cone_part(r: &mut Rng) -> String {
+    let t = [1.0, 1.5, 2.0, 3.0][(r.next() * 4.0) as usize % 4];
+    let r0 = r.range(2.0, 150.0);
+    let r1 = if r.chance(0.2) {
+        r0
+    } else {
+        r.range(2.0, 150.0)
+    };
+    format!(
+        r#"{{"id": "cone", "thickness": {t}, "bend_radius": 2, "k_factor": {},
+            "base": {{"cone": {{"radii": [{r0}, {r1}], "height": {}, "sweep": {},
+            "material": "{}"}}}}}}"#,
+        r.range(0.25, 0.5),
+        if r.chance(0.1) {
+            r.range(0.5, 3.0)
+        } else {
+            r.range(3.0, 200.0)
+        },
+        r.range(1.0, 359.0),
+        r.pick(&["outside", "inside"]),
+    )
+}
+
 fn main() {
     let count: usize = std::env::args().nth(1).map_or(500, |s| s.parse().unwrap());
     let seed: u64 = std::env::args().nth(2).map_or(1, |s| s.parse().unwrap());
@@ -293,6 +319,7 @@ fn main() {
         let json = match std::env::var("KIND").as_deref() {
             Ok("profile") => profile_part(&mut rng),
             Ok("fold") => folded_part(&mut rng),
+            Ok("cone") => cone_part(&mut rng),
             _ => spec(&mut rng),
         };
         let part: gusset_sheet::spec::PartSpec = serde_json::from_str(&json).unwrap();
@@ -300,13 +327,18 @@ fn main() {
             let flat = gusset_sheet::flat::flat_pattern(&part)?;
             let brep = gusset_sheet::fold::fold(&part)?;
             let exact = gusset_sheet::fold::exact_mass(&part)?;
-            let mesh = gusset_sheet::fold::mass(&brep, 0.02)?;
-            let rel = (exact.volume - mesh.volume).abs() / exact.volume;
-            if rel > 3e-3 {
-                return Err(gusset_sheet::SheetError::Kernel(format!(
-                    "volume: exact {} mesh {}",
-                    exact.volume, mesh.volume
-                )));
+            let rel = |m: gusset_sheet::fold::Mass| (exact.volume - m.volume).abs() / exact.volume;
+            // Small radii mesh coarsely: then a ten times finer mesh must
+            // come at least five times closer.
+            let coarse = gusset_sheet::fold::mass(&brep, 0.02)?;
+            if rel(coarse) > 3e-3 {
+                let fine = gusset_sheet::fold::mass(&brep, 0.002)?;
+                if rel(fine) > rel(coarse) / 5.0 {
+                    return Err(gusset_sheet::SheetError::Kernel(format!(
+                        "volume: exact {} mesh {} (finer {})",
+                        exact.volume, coarse.volume, fine.volume
+                    )));
+                }
             }
             let _ = flat;
             Ok(())

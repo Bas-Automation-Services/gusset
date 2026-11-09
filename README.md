@@ -25,6 +25,9 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
 - **Contour flanges** of lines and tangent arcs on a base edge or a flange's tip, full or
   partial width, or along several edges in one go, mitered at each corner (every leg and
   bend cut exactly, with corner reliefs).
+- **Rolled cones and cylinders:** the sheet between two coaxial arcs (a lofted flange
+  between them, or a straight line rolled around an axis), material on either side, unrolled
+  on its neutral surface.
 - **Folds** along a line across the plate or a flange, nested, at any angle to the outline; **jogs**
   (Z-steps by an offset).
 - **Holes and cut-outs** anywhere in the flat, across bends, and across the outline as

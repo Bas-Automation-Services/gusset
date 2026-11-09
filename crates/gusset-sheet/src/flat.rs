@@ -542,6 +542,9 @@ pub fn flat_pattern(spec: &PartSpec) -> Result<FlatPattern, SheetError> {
 }
 
 pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
+    if let Some(l) = crate::cone::layout(spec) {
+        return l;
+    }
     let spec = &*spec.resolved()?;
     let base = &spec.base.outline;
     let n = base.len();
@@ -2471,6 +2474,19 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
 }
 
 impl FlatPattern {
+    /// The blank's bounding box, [lowest, highest] x and y, arcs exact.
+    pub fn bounds(&self) -> [P2; 2] {
+        let ring = Ring {
+            points: self.outline.clone(),
+            arcs: self.outline_arcs.clone(),
+        };
+        let (x, y) = (
+            extent_along(&ring, [1.0, 0.0], [0.0, 0.0]),
+            extent_along(&ring, [0.0, 1.0], [0.0, 0.0]),
+        );
+        [[x.0, y.0], [x.1, y.1]]
+    }
+
     /// Area of the flat blank: outline minus holes and cut-outs.
     pub fn area(&self) -> f64 {
         path_area(&self.outline, &self.outline_arcs)

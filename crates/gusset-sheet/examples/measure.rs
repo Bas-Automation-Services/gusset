@@ -14,10 +14,8 @@ fn main() {
     for part in &parts {
         match (flat::flat_pattern(part), fold::exact_mass(part)) {
             (Ok(f), Ok(m)) => {
-                let extent = |i: usize| {
-                    let v = f.outline.iter().map(|p| p[i]);
-                    v.clone().fold(f64::MIN, f64::max) - v.fold(f64::MAX, f64::min)
-                };
+                let [lo, hi] = f.bounds();
+                let extent = |i: usize| hi[i] - lo[i];
                 let holes: f64 = f
                     .holes
                     .iter()
