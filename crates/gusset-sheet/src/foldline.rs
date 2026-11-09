@@ -18,17 +18,21 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
 
     // Each fold as a virtual edge: s along the turning side's normal from the line.
     let mut lines = Vec::new();
+    // Per fold line: the span along it that bends, for a bounded one.
+    let mut spans = Vec::new();
     for f in &spec.folds {
         let (a, b) = (f.line[0], f.line[1]);
         let d = sub(b, a);
         let len = dot(d, d).sqrt();
-        if len < EPS || !(f.angle > 0.0 && f.angle < 180.0) {
+        let most = if f.bounded { 180.0 + EPS } else { 180.0 };
+        if len < EPS || !(f.angle > 0.0 && f.angle < most) {
             return Err(SheetError::Invalid(format!(
                 "fold {}: needs a line and an angle between 0 and 180",
                 f.id
             )));
         }
         let u = [d[0] / len, d[1] / len];
+        spans.push(f.bounded.then_some((0.0, len)));
         let r = f.bend_radius.unwrap_or(spec.bend_radius);
         let (bend_allowance, k) = spec.bend_allowance(f.angle, r, f.k_factor)?;
         let s0 = match f.location {
@@ -81,7 +85,11 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
                 Zone::Bend(_) => false,
             };
             let f = &lines[i];
-            let (lo, hi) = extent(c, |p| s(f, p));
+            // A bounded fold: only what lies across its span.
+            let (lo, hi) = match spans[i] {
+                Some(span) => extent_within(c, f, span, |p| s(f, p)),
+                None => extent(c, |p| s(f, p)),
+            };
             if foldable && lo < f.s0 + f.bend_allowance - EPS && hi > f.s0 + EPS {
                 if region.is_some_and(|z| z != c.zone) {
                     return unsupported(format!(
@@ -111,6 +119,7 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
                     f.n = [-f.n[0], -f.n[1]];
                     f.s0 = -f.bend_allowance - f.s0;
                 }
+                spans[i] = spans[i].map(|(lo, hi)| (-hi, -lo));
             }
         }
         let f = &lines[i];
@@ -121,16 +130,46 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
                 cells.push(cell);
                 continue;
             }
-            let (below, rest) = split(&cell.polygon, &cell.arcs, f, f.s0)?;
-            // Several staying pieces: a U whose base turns.
-            let many = below.len() > 1;
-            for (n, piece) in below.into_iter().enumerate() {
-                cells.push(piece_cell(&label(&cell.name, n, many), piece, region));
-            }
+            let (below, rest) = split(
+                &cell.polygon,
+                &cell.arcs,
+                f,
+                f.s0,
+                spans[i].map(|s| (s, -1.0)),
+            )?;
+            let by = |p: &Piece| beside(f, spans[i], &piece_cell("", p.clone(), region));
+            // Beside a bounded fold the plates run on past the line: what
+            // lies beside its span goes back to the plate it touches (no
+            // cut there), the staying one's or the turning one's.
+            let (mut stay, back): (Vec<Piece>, Vec<Piece>) =
+                below.into_iter().partition(|p| !by(p));
+            let (kept, rest): (Vec<Piece>, Vec<Piece>) = rest.into_iter().partition(by);
+            let mut turning = Vec::new();
+            let mut hanging = Vec::new();
             for piece in rest {
-                let (strip, above) = split(&piece.0, &piece.1, f, f.s0 + f.bend_allowance)?;
-                strips.extend(strip);
-                turns.extend(above);
+                let (strip, above) = split(
+                    &piece.0,
+                    &piece.1,
+                    f,
+                    f.s0 + f.bend_allowance,
+                    spans[i].map(|s| (s, 1.0)),
+                )?;
+                for piece in strip {
+                    if by(&piece) {
+                        hanging.push(piece);
+                    } else {
+                        strips.push(piece);
+                    }
+                }
+                turning.extend(above);
+            }
+            absorb(&mut turning, hanging);
+            absorb(&mut turning, back);
+            turns.extend(turning);
+            absorb(&mut stay, kept);
+            let many = stay.len() > 1;
+            for (n, piece) in stay.into_iter().enumerate() {
+                cells.push(piece_cell(&label(&cell.name, n, many), piece, region));
             }
         }
         if strips.is_empty() || turns.is_empty() {
@@ -223,6 +262,9 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
     for (i, f) in lines.iter().enumerate() {
         let h = host(&folds, i);
         for c in &layout.cells {
+            if beside(f, spans[i], c) {
+                continue;
+            }
             let owner = match c.zone {
                 Zone::Base => None,
                 Zone::Bend(j) | Zone::Flange(j) => Some(j),
@@ -232,7 +274,11 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
                     continue;
                 }
             }
-            let (lo, hi) = extent(c, |p| s(f, p));
+            // A bounded fold: only the cell's part across its span counts.
+            let (lo, hi) = match spans[i] {
+                Some(span) => extent_within(c, f, span, |p| s(f, p)),
+                None => extent(c, |p| s(f, p)),
+            };
             let ok = match c.zone {
                 Zone::Bend(j) if j == i => true,
                 Zone::Bend(j) | Zone::Flange(j) if hangs_on(j, i) => {
@@ -278,6 +324,124 @@ pub(crate) fn apply_folds(layout: &mut Layout, spec: &PartSpec) -> Result<(), Sh
         };
     }
     Ok(())
+}
+
+/// Lowest and highest value of `g` over a cell's boundary where it runs
+/// across a bounded fold's span (arcs sampled), its ends at the span's
+/// edges included.
+fn extent_within(c: &Cell, f: &Fold, (lo, hi): (f64, f64), g: impl Fn(P2) -> f64) -> (f64, f64) {
+    let t = |p: P2| dot(sub(p, f.edge_point), f.u);
+    let inside = |p: P2| t(p) >= lo - EPS && t(p) <= hi + EPS;
+    let mut values = Vec::new();
+    let n = c.polygon.len();
+    for k in 0..n {
+        let (p, q) = (c.polygon[k], c.polygon[(k + 1) % n]);
+        let mut pts = vec![p];
+        if let Some(arc) = c.arcs[k] {
+            pts.extend(curve_points(p, q, arc, 16));
+        }
+        pts.push(q);
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if inside(a) {
+                values.push(g(a));
+            }
+            for edge in [lo, hi] {
+                let (ta, tb) = (t(a) - edge, t(b) - edge);
+                if ta * tb < 0.0 {
+                    let x = ta / (ta - tb);
+                    values.push(g([a[0] + x * (b[0] - a[0]), a[1] + x * (b[1] - a[1])]));
+                }
+            }
+        }
+    }
+    values
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+}
+
+/// Each extra piece merged into the piece it shares a straight edge with
+/// (the cut a split made there undone), or kept apart.
+fn absorb(pieces: &mut Vec<Piece>, extra: Vec<Piece>) {
+    let mut left = extra;
+    loop {
+        let before = left.len();
+        left.retain(|x| {
+            for p in pieces.iter_mut() {
+                if let Some(m) = merge(p, x) {
+                    *p = m;
+                    return false;
+                }
+            }
+            true
+        });
+        if left.is_empty() || left.len() == before {
+            break;
+        }
+    }
+    pieces.extend(left);
+}
+
+/// Two pieces as one where an edge of one runs back along an edge of the
+/// other; the cut's two ends go where the boundary runs straight on.
+fn merge(a: &Piece, b: &Piece) -> Option<Piece> {
+    let (pa, aa, pb, ab) = (&a.0, &a.1, &b.0, &b.1);
+    let (n, m) = (pa.len(), pb.len());
+    let (k, j) = (0..n).find_map(|k| {
+        (0..m)
+            .find(|&j| {
+                aa[k].is_none()
+                    && ab[j].is_none()
+                    && pa[k] == pb[(j + 1) % m]
+                    && pa[(k + 1) % n] == pb[j]
+            })
+            .map(|j| (k, j))
+    })?;
+    // a up to its k, round b from past the shared edge, a from k + 1 on.
+    let (mut pts, mut arcs) = (Vec::new(), Vec::new());
+    for i in 0..=k {
+        pts.push(pa[i]);
+        arcs.push(aa[i]);
+    }
+    // The segment from a[k] on is b's from b[j + 1].
+    *arcs.last_mut().unwrap() = ab[(j + 1) % m];
+    for i in 2..m {
+        let q = (j + i) % m;
+        pts.push(pb[q]);
+        arcs.push(ab[q]);
+    }
+    for i in k + 1..n {
+        pts.push(pa[i]);
+        arcs.push(aa[i]);
+    }
+    // Drop the two ends where the boundary runs straight through them.
+    for end in [pa[k], pa[(k + 1) % n]] {
+        let len = pts.len();
+        if let Some(i) = pts.iter().position(|&p| p == end) {
+            let prev = (i + len - 1) % len;
+            let (a, p, c) = (pts[prev], pts[i], pts[(i + 1) % len]);
+            let (d1, d2) = (sub(p, a), sub(c, p));
+            let cross = d1[0] * d2[1] - d1[1] * d2[0];
+            if arcs[prev].is_none()
+                && arcs[i].is_none()
+                && cross.abs() <= 1e-9 * dot(d1, d1).sqrt() * dot(d2, d2).sqrt()
+                && dot(d1, d2) > 0.0
+            {
+                pts.remove(i);
+                arcs.remove(i);
+            }
+        }
+    }
+    Some((pts, arcs))
+}
+
+/// Whether a cell lies wholly beside a bounded fold's span: it stays as it
+/// is, or turns with what it hangs on.
+fn beside(f: &Fold, span: Option<(f64, f64)>, c: &Cell) -> bool {
+    span.is_some_and(|(lo, hi)| {
+        let (a, b) = extent(c, |p| dot(sub(p, f.edge_point), f.u));
+        b <= lo + EPS || a >= hi - EPS
+    })
 }
 
 /// A piece's name: numbered from 0 when there are several, as a cut-out
@@ -335,13 +499,31 @@ fn arc_points(p: P2, q: P2, arc: Arc, n: usize) -> Vec<P2> {
 /// Splits a counter-clockwise boundary of lines and arcs by the line s = c of
 /// fold f into its pieces below and above. The line must cross straight
 /// segments, through no vertex.
+/// `lean`: a bounded fold's span, and the side (-1 below, +1 above) its
+/// corners on the line beside the span count on (a plate beside the bend
+/// running up to it).
 fn split(
     pts: &[P2],
     arcs: &[Option<Curve>],
     f: &Fold,
     c: f64,
+    lean: Option<((f64, f64), f64)>,
 ) -> Result<(Vec<Piece>, Vec<Piece>), SheetError> {
-    let s = |p: P2| dot(sub(p, f.edge_point), f.n) - c;
+    let raw = |p: P2| dot(sub(p, f.edge_point), f.n) - c;
+    let s = |p: P2| {
+        let v = raw(p);
+        match lean {
+            Some(((lo, hi), side)) if v.abs() < EPS => {
+                let t = dot(sub(p, f.edge_point), f.u);
+                if t <= lo + EPS || t >= hi - EPS {
+                    side * 10.0 * EPS
+                } else {
+                    v
+                }
+            }
+            _ => v,
+        }
+    };
     let unsupported = |what: &str| {
         Err(SheetError::Unsupported(format!(
             "fold {}: {what}",
@@ -367,7 +549,13 @@ fn split(
             continue;
         }
         if (sp > 0.0) != (sq > 0.0) {
-            let t = sp / (sp - sq);
+            // Where it truly crosses: at a leaned corner, the corner itself.
+            let (rp, rq) = (raw(p), raw(q));
+            let t = if rp == rq {
+                sp / (sp - sq)
+            } else {
+                (rp / (rp - rq)).clamp(0.0, 1.0)
+            };
             let x = [p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])];
             crossings.push((k, t, x, sq > 0.0, dot(x, f.u)));
         }
@@ -432,6 +620,16 @@ fn split(
                         "fold {}: its line splits the part ambiguously",
                         f.flange
                     )));
+                }
+            }
+            // A crossing at a leaned corner repeats it.
+            let mut k = 0;
+            while k < ps.len() && ps.len() > 3 {
+                if ps[k] == ps[(k + 1) % ps.len()] {
+                    ps.remove(k);
+                    ars.remove(k);
+                } else {
+                    k += 1;
                 }
             }
             out.push((ps, ars));

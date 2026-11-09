@@ -699,6 +699,13 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 // Same turning sense as the parent means the same flat bend direction.
                 (i, end, parent_up == (step.side == Side::Up))
             }
+            // Resolved to base edges before.
+            EdgeRef::Face(e) => {
+                return Err(SheetError::Invalid(format!(
+                    "{}: face {} has no bend",
+                    step.id, e.face
+                )))
+            }
         };
         let strip = strips[i].as_mut().unwrap();
         strip.end = start + step.reach();
@@ -706,7 +713,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         folds.push(Fold {
             flange: step.id.clone(),
             parent: match &step.on {
-                EdgeRef::Base(_) => None,
+                EdgeRef::Base(_) | EdgeRef::Face(_) => None,
                 EdgeRef::Tip(p) => folds.iter().position(|f| &f.flange == p),
             },
             edge_point: a,
@@ -2603,6 +2610,20 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             )));
         }
     }
+    // No cell runs over itself: two features' pieces lie over each other,
+    // such as a relief notch running into a neighbouring bend.
+    let crossed = layout.cells.iter().find_map(|c| {
+        crate::faces::overlap(&Ring {
+            points: c.polygon.clone(),
+            arcs: c.arcs.clone(),
+        })
+    });
+    if let Some((a, b)) = crossed {
+        return Err(SheetError::Unsupported(format!(
+            "features overlap in the flat pattern near [{:.3}, {:.3}] and [{:.3}, {:.3}] (a relief or cut running into a bend)",
+            a[0], a[1], b[0], b[1]
+        )));
+    }
     simplify(
         &mut layout.flat.outline,
         &mut layout.flat.outline_arcs,
@@ -2779,6 +2800,8 @@ mod tests {
             jogs: Vec::new(),
             face_cuts: Vec::new(),
             corner_seams: Vec::new(),
+            faces: Vec::new(),
+            bends: Vec::new(),
             bend_order: Vec::new(),
         }
     }

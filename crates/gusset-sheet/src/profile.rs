@@ -38,6 +38,7 @@ impl PartSpec {
                 side,
                 bend_radius: None,
                 k_factor: None,
+                bounded: false,
             };
             let back = if j.side == Side::Up {
                 Side::Down
@@ -109,6 +110,11 @@ impl PartSpec {
     }
 
     pub fn resolved(&self) -> Result<Cow<'_, PartSpec>, SheetError> {
+        if !self.faces.is_empty() || !self.bends.is_empty() || self.has_face_edges() {
+            return Ok(Cow::Owned(
+                crate::faces::without_faces(self)?.resolved()?.into_owned(),
+            ));
+        }
         if !self.jogs.is_empty() {
             return Ok(Cow::Owned(self.without_jogs()?.resolved()?.into_owned()));
         }

@@ -1,7 +1,7 @@
 # Gusset
 
 An open sheet metal kernel in Rust. Describe a part as JSON (a base plate and its flanges,
-hems, contour flanges, folds, holes and cut-outs) and Gusset gives you the folded solid, the
+hems, contour flanges, folds, faces joined by bends, holes and cut-outs) and Gusset gives you the folded solid, the
 flat pattern and its measurements, as STEP, DXF, SVG, a mesh or numbers.
 
 Gusset is exact: the folded solid is an analytic B-rep, its mass properties are integrated, not
@@ -30,6 +30,11 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   on its neutral surface.
 - **Folds** along a line across the plate or a flange, nested, at any angle to the outline; **jogs**
   (Z-steps by an offset).
+- **Faces joined by bends:** plates on planes of their own, anywhere in 3D, each joined to the
+  base or an earlier face by a bend between two parallel edges. The faces are extended or
+  trimmed to meet the bend, with bend reliefs where a face carries on beside it. Faces at an
+  angle get one bend; parallel faces two (fixed edges or 45 degrees side by side, 90 degrees or
+  a full radius facing each other). Holes and cut-outs on a face, flanges and hems on its edges.
 - **Holes and cut-outs** anywhere in the flat, across bends, and across the outline as
   notches, also through a mitered bend's curved end; or placed on a flange's face, measured
   along its edge and up from the mold line.

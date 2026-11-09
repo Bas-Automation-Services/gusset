@@ -5,7 +5,8 @@
 //!     cargo run --release --example fuzz -- <count> <seed>
 //!     SAFE=1 cargo run --release --example fuzz -- 1000 7   (fewer self-intersecting parts)
 //!     WHY=1 ...                                             (print each refusal and its part)
-//!     KIND=profile|fold|cone|emboss ...                     (profiles, fold lines, rolled cones, embosses)
+//!     KIND=profile|fold|cone|emboss|bend ...                (profiles, fold lines, rolled cones, embosses,
+//!                                                           faces joined by bends)
 //!
 //! Without SAFE many parts fold into themselves (flanges past 90 degrees into a
 //! neighbour); Gusset refuses those (`clash`).
@@ -377,6 +378,184 @@ fn emboss_part(r: &mut Rng) -> String {
     )
 }
 
+type V3 = [f64; 3];
+
+fn v_add(a: V3, b: V3) -> V3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+fn v_scale(a: V3, s: f64) -> V3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+/// Faces joined by bends: off base edges, or one off the last face's far edge.
+fn bend_part(r: &mut Rng) -> String {
+    let t = [1.0, 1.5, 2.0, 3.0][(r.next() * 4.0) as usize % 4];
+    let rad = r.range(0.5, 5.0);
+    let (w, h) = (r.range(40.0, 150.0), r.range(30.0, 100.0));
+    let corners = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
+    let (mut faces, mut bends, mut flanges) = (Vec::new(), Vec::new(), Vec::new());
+    // Edges to bend from: start, direction, length, outward, their plate's
+    // normal (3D), the plate and the edge's index.
+    type Edge = (V3, V3, f64, V3, V3, String, usize);
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut used = Vec::new();
+    for k in 0..1 + (r.next() * 3.0) as usize {
+        let chained = k > 0 && r.chance(0.4);
+        let (a0, a, len, out, n, from, edge) = if chained {
+            edges.last().unwrap().clone()
+        } else {
+            let e = (0..4)
+                .map(|_| (r.next() * 4.0) as usize % 4)
+                .find(|e| !used.contains(e))
+                .unwrap_or(0);
+            used.push(e);
+            let (p, q) = (corners[e], corners[(e + 1) % 4]);
+            let len = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+            let a = [(q[0] - p[0]) / len, (q[1] - p[1]) / len, 0.0];
+            (
+                [p[0], p[1], 0.0],
+                a,
+                len,
+                [a[1], -a[0], 0.0],
+                [0.0, 0.0, 1.0],
+                "base".to_string(),
+                e,
+            )
+        };
+        let id = format!("f{k}");
+        let (x0, x1) = if r.chance(0.5) {
+            (0.0, len)
+        } else {
+            (r.range(-10.0, len * 0.4), r.range(len * 0.6, len + 10.0))
+        };
+        let height = r.range(10.0, 50.0);
+        let mut double = String::new();
+        // The face's plane: through the edge's line moved out by `gap` (and
+        // off its plate by `lift` for parallel faces), its y axis leaving the
+        // edge (or, facing, coming back over the plate).
+        let (origin, y_axis, v0, facing);
+        if r.next() < 0.7 {
+            let tilt = r.range(15.0f64, 165.0).to_radians();
+            let up = if r.chance(0.5) { 1.0 } else { -1.0 };
+            origin = v_add(a0, v_scale(out, r.range(-4.0, 15.0)));
+            y_axis = v_add(v_scale(out, tilt.cos()), v_scale(n, up * tilt.sin()));
+            v0 = r.range(-3.0, 15.0);
+            facing = false;
+        } else {
+            let lift = if r.chance(0.5) { 1.0 } else { -1.0 } * r.range(t + 1.0, 30.0);
+            let side_by_side = r.chance(0.5);
+            let gap = if side_by_side {
+                r.range(1.0, 30.0)
+            } else {
+                r.range(-10.0, 5.0)
+            };
+            origin = v_add(v_add(a0, v_scale(out, gap)), v_scale(n, lift));
+            y_axis = if side_by_side {
+                out
+            } else {
+                v_scale(out, -1.0)
+            };
+            v0 = if side_by_side {
+                0.0
+            } else {
+                r.range(-5.0, 5.0)
+            };
+            facing = !side_by_side;
+            let kinds: &[&str] = if side_by_side {
+                &["fixed_edges", "deg45"]
+            } else {
+                &["deg90", "full_radius"]
+            };
+            double = format!(
+                r#", "double": "{}", "fixed": "{}""#,
+                r.pick(kinds),
+                r.pick(&["from", "to"])
+            );
+        }
+        // Local x along the edge, or against it for a facing face (its edge 0
+        // must still run with the face on its left).
+        let x_axis = if facing { v_scale(a, -1.0) } else { a };
+        let (lx0, lx1, origin) = if facing {
+            (len - x1, len - x0, v_add(origin, v_scale(a, len)))
+        } else {
+            (x0, x1, origin)
+        };
+        let holes = if r.chance(0.3) {
+            format!(
+                r#", "holes": [{{ "center": [{}, {}], "diameter": {} }}]"#,
+                (lx0 + lx1) / 2.0,
+                v0 + height / 2.0,
+                r.range(2.0, 8.0)
+            )
+        } else {
+            String::new()
+        };
+        faces.push(format!(
+            r#"{{ "id": "{id}", "origin": {origin:?}, "x_axis": {x_axis:?}, "y_axis": {y_axis:?},
+                 "outline": [[{lx0}, {v0}], [{lx1}, {v0}], [{lx1}, {top}], [{lx0}, {top}]],
+                 "material": "{}" {holes} }}"#,
+            r.pick(&["up", "down"]),
+            top = v0 + height,
+        ));
+        let radius = if r.chance(0.3) {
+            format!(r#", "bend_radius": {}"#, r.range(0.5, 6.0))
+        } else {
+            String::new()
+        };
+        bends.push(format!(
+            r#"{{ "id": "b{k}", "from": {{ "face": "{from}", "edge": {edge} }},
+                 "to": {{ "face": "{id}", "edge": 0 }} {double} {radius} }}"#
+        ));
+        // Its far edge (2): from (lx1, top) back to (lx0, top).
+        let far = v_add(
+            v_add(origin, v_scale(x_axis, lx1)),
+            v_scale(y_axis, v0 + height),
+        );
+        let normal = [
+            x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1],
+            x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2],
+            x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0],
+        ];
+        edges.push((
+            far,
+            v_scale(x_axis, -1.0),
+            lx1 - lx0,
+            y_axis,
+            normal,
+            id.clone(),
+            2,
+        ));
+        if r.chance(0.2) {
+            flanges.push(format!(
+                r#"{{ "id": "l{k}", "on": {{ "face": {{ "face": "{id}", "edge": 2 }} }}, "angle": {},
+                     "length": {}, "datum": "outer", "position": "outside", "side": "{}" }}"#,
+                r.range(30.0, 120.0),
+                r.range(6.0, 20.0),
+                r.pick(&["up", "down"])
+            ));
+        }
+    }
+    let relief = if r.chance(0.3) {
+        format!(
+            r#""relief": {{ "shape": "{}", "width": 2, "depth": {}, "minimum_remnant": {} }},"#,
+            r.pick(&["straight", "round"]),
+            r.range(1.0, 3.0),
+            r.range(0.0, 8.0)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"{{"id": "bend", "thickness": {t}, "bend_radius": {rad}, "k_factor": {}, {relief}
+            "base": {{"outline": [[0, 0], [{w}, 0], [{w}, {h}], [0, {h}]]}},
+            "faces": [{}], "bends": [{}], "flanges": [{}]}}"#,
+        r.range(0.25, 0.5),
+        faces.join(","),
+        bends.join(","),
+        flanges.join(",")
+    )
+}
+
 fn main() {
     let count: usize = std::env::args().nth(1).map_or(500, |s| s.parse().unwrap());
     let seed: u64 = std::env::args().nth(2).map_or(1, |s| s.parse().unwrap());
@@ -389,6 +568,7 @@ fn main() {
             Ok("fold") => folded_part(&mut rng),
             Ok("cone") => cone_part(&mut rng),
             Ok("emboss") => emboss_part(&mut rng),
+            Ok("bend") => bend_part(&mut rng),
             _ => spec(&mut rng),
         };
         let part: gusset_sheet::spec::PartSpec = serde_json::from_str(&json).unwrap();

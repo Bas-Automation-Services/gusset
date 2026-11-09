@@ -29,6 +29,13 @@
         }
       ]
     },
+    "bends": {
+      "description": "Bends joining an edge of the base or a face to an edge of another\nface, in build order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Bend"
+      }
+    },
     "contours": {
       "description": "Contour flanges, built after the flanges.",
       "type": "array",
@@ -48,6 +55,13 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/FaceCuts"
+      }
+    },
+    "faces": {
+      "description": "Faces on planes of their own, each joined to the base or an earlier\nface by one of `bends`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Face"
       }
     },
     "flanges": {
@@ -194,6 +208,65 @@
       "enum": [
         "top",
         "bottom"
+      ]
+    },
+    "Bend": {
+      "description": "A bend from an edge of the base or of a face joined earlier (`from`) to\nan edge of a face (`to`), which joins that face to the part. The edges\nmust be parallel; the bend runs where they overlap along it. Each face\nis extended or trimmed, square to the bend, to where the bend meets it;\na face trimmed beside the bend gets the part's bend reliefs there, where\nit carries on past the bend.\n\nFaces at an angle get one bend, on the inside of the corner their sheets\nmake. Parallel faces get two (`double`).",
+      "type": "object",
+      "properties": {
+        "bend_radius": {
+          "description": "Inner bend radius for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "double": {
+          "description": "Between parallel faces. Default: `deg45` for faces side by side,\n`deg90` for faces that face each other.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoubleBend"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixed": {
+          "description": "The edge that stays where it is in a 45 or 90 degree or full radius\ndouble bend; the other face is extended or trimmed. Default: `from`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FixedEdge"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from": {
+          "$ref": "#/$defs/FaceEdge"
+        },
+        "id": {
+          "type": "string"
+        },
+        "k_factor": {
+          "description": "K-factor for this feature's bends, in place of the part's.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "to": {
+          "$ref": "#/$defs/FaceEdge"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "from",
+        "to"
       ]
     },
     "BendLocation": {
@@ -544,6 +617,31 @@
         "outline"
       ]
     },
+    "DoubleBend": {
+      "description": "Two bends between parallel faces.",
+      "oneOf": [
+        {
+          "description": "Faces side by side: both edges stay, two equal bends of whatever\nangle joins them.",
+          "type": "string",
+          "const": "fixed_edges"
+        },
+        {
+          "description": "Faces side by side: two bends of 45 degrees.",
+          "type": "string",
+          "const": "deg45"
+        },
+        {
+          "description": "Faces facing each other: two bends of 90 degrees and a straight wall.",
+          "type": "string",
+          "const": "deg90"
+        },
+        {
+          "description": "Faces facing each other: one bend of 180 degrees, its inner radius\nhalf the gap between them.",
+          "type": "string",
+          "const": "full_radius"
+        }
+      ]
+    },
     "EdgeRef": {
       "description": "The edge a flange is built on.",
       "oneOf": [
@@ -573,6 +671,19 @@
           "additionalProperties": false,
           "required": [
             "tip"
+          ]
+        },
+        {
+          "description": "Edge `edge` of the face with this id (or of \"base\").",
+          "type": "object",
+          "properties": {
+            "face": {
+              "$ref": "#/$defs/FaceEdge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "face"
           ]
         }
       ]
@@ -693,6 +804,91 @@
         }
       ]
     },
+    "Face": {
+      "description": "A face: a plate on a plane of its own (in the base frame), joined to the\npart by a bend.",
+      "type": "object",
+      "properties": {
+        "bulges": {
+          "description": "Per outline edge: 0 for a line, otherwise an arc's bulge, as on the\nbase. Bends sit on lines only. All lines when empty.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "cutouts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Cutout"
+          }
+        },
+        "holes": {
+          "description": "Holes and cut-outs in the plane's x, y.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Hole"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "material": {
+          "description": "The sheet lies on the normal's side of the plane (`up`) or the other.",
+          "$ref": "#/$defs/Side"
+        },
+        "origin": {
+          "description": "A point on the plane.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "outline": {
+          "description": "Counter-clockwise polygon in the plane's x, y, seen from its normal\n(x cross y). Edge `i` runs from `outline[i]` to `outline[i + 1]`.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "x_axis": {
+          "description": "The plane's x and y directions: unit length, square to each other.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "y_axis": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "origin",
+        "x_axis",
+        "y_axis",
+        "outline",
+        "material"
+      ]
+    },
     "FaceCuts": {
       "description": "Holes and cut-outs on a flange's face, cut square through it. Positions\nare [along, up]: along the edge the flange stands on (from its start, as\nin the flat), and along the face from the outer mold line, where the\nflange's outer face meets the plane of the outer face it is bent from (for\na 90-degree flange: the height over that face). Cut-outs run\ncounter-clockwise in [along, up]. They stay on the flat of the face, clear\nof its bends; across its tip or ends they are notches.",
       "type": "object",
@@ -717,6 +913,33 @@
       "additionalProperties": false,
       "required": [
         "on"
+      ]
+    },
+    "FaceEdge": {
+      "description": "Edge `edge` of the base's outline (face \"base\") or of a face's.",
+      "type": "object",
+      "properties": {
+        "edge": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "face": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "face",
+        "edge"
+      ]
+    },
+    "FixedEdge": {
+      "description": "Which of a bend's edges stays.",
+      "type": "string",
+      "enum": [
+        "from",
+        "to"
       ]
     },
     "Flange": {
@@ -813,6 +1036,10 @@
             "null"
           ],
           "format": "double"
+        },
+        "bounded": {
+          "description": "Bend only the sheet the line crosses between its two points (up to\n180 degrees); sheet beside them stays, or turns with what it sits on.\nOtherwise the line runs on across the part.",
+          "type": "boolean"
         },
         "id": {
           "type": "string"

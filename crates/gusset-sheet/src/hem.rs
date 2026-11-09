@@ -176,7 +176,7 @@ pub(crate) fn steps(spec: &PartSpec) -> Result<Vec<Step>, SheetError> {
                 EdgeRef::Tip(p) => {
                     ordered.iter().any(|o| &o.id == p) || !steps.iter().any(|q| &q.id == p)
                 }
-                EdgeRef::Base(_) => true,
+                EdgeRef::Base(_) | EdgeRef::Face(_) => true,
             })
             .unwrap_or(0);
         ordered.push(steps.remove(ready));

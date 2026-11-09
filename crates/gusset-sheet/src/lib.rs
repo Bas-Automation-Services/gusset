@@ -4,6 +4,7 @@ pub mod check;
 pub mod clash;
 mod cone;
 mod emboss;
+mod faces;
 mod cut;
 pub mod flat;
 pub mod fold;

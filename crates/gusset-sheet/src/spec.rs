@@ -46,6 +46,14 @@ pub struct PartSpec {
     /// different settings), which otherwise meet by build order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corner_seams: Vec<CornerSeam>,
+    /// Faces on planes of their own, each joined to the base or an earlier
+    /// face by one of `bends`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<Face>,
+    /// Bends joining an edge of the base or a face to an edge of another
+    /// face, in build order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bends: Vec<Bend>,
     /// Bends to make first, in this order, by the names the flat pattern
     /// gives them (a feature's id; its further bends `id.2`, `id.3`, ...). The
     /// rest follow in the default order: the bends furthest from the base
@@ -66,6 +74,96 @@ pub struct CornerSeam {
     /// Default: the relief's miter gap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gap: Option<f64>,
+}
+
+/// A face: a plate on a plane of its own (in the base frame), joined to the
+/// part by a bend.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Face {
+    pub id: String,
+    /// A point on the plane.
+    pub origin: [f64; 3],
+    /// The plane's x and y directions: unit length, square to each other.
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+    /// Counter-clockwise polygon in the plane's x, y, seen from its normal
+    /// (x cross y). Edge `i` runs from `outline[i]` to `outline[i + 1]`.
+    pub outline: Vec<[f64; 2]>,
+    /// Per outline edge: 0 for a line, otherwise an arc's bulge, as on the
+    /// base. Bends sit on lines only. All lines when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bulges: Vec<f64>,
+    /// The sheet lies on the normal's side of the plane (`up`) or the other.
+    pub material: Side,
+    /// Holes and cut-outs in the plane's x, y.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Hole>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cutouts: Vec<Cutout>,
+}
+
+/// A bend from an edge of the base or of a face joined earlier (`from`) to
+/// an edge of a face (`to`), which joins that face to the part. The edges
+/// must be parallel; the bend runs where they overlap along it. Each face
+/// is extended or trimmed, square to the bend, to where the bend meets it;
+/// a face trimmed beside the bend gets the part's bend reliefs there, where
+/// it carries on past the bend.
+///
+/// Faces at an angle get one bend, on the inside of the corner their sheets
+/// make. Parallel faces get two (`double`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Bend {
+    pub id: String,
+    pub from: FaceEdge,
+    pub to: FaceEdge,
+    /// Between parallel faces. Default: `deg45` for faces side by side,
+    /// `deg90` for faces that face each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double: Option<DoubleBend>,
+    /// The edge that stays where it is in a 45 or 90 degree or full radius
+    /// double bend; the other face is extended or trimmed. Default: `from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<FixedEdge>,
+    /// Inner bend radius for this feature's bends, in place of the part's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bend_radius: Option<f64>,
+    /// K-factor for this feature's bends, in place of the part's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k_factor: Option<f64>,
+}
+
+/// Edge `edge` of the base's outline (face "base") or of a face's.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FaceEdge {
+    pub face: String,
+    pub edge: usize,
+}
+
+/// Two bends between parallel faces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DoubleBend {
+    /// Faces side by side: both edges stay, two equal bends of whatever
+    /// angle joins them.
+    FixedEdges,
+    /// Faces side by side: two bends of 45 degrees.
+    Deg45,
+    /// Faces facing each other: two bends of 90 degrees and a straight wall.
+    Deg90,
+    /// Faces facing each other: one bend of 180 degrees, its inner radius
+    /// half the gap between them.
+    FullRadius,
+}
+
+/// Which of a bend's edges stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEdge {
+    From,
+    To,
 }
 
 /// Holes and cut-outs on a flange's face, cut square through it. Positions
@@ -169,6 +267,11 @@ pub struct FoldLine {
     /// K-factor for this feature's bends, in place of the part's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub k_factor: Option<f64>,
+    /// Bend only the sheet the line crosses between its two points (up to
+    /// 180 degrees); sheet beside them stays, or turns with what it sits on.
+    /// Otherwise the line runs on across the part.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bounded: bool,
 }
 
 /// Where the bend sits relative to a fold line.
@@ -745,6 +848,8 @@ pub enum EdgeRef {
     /// of a contour flange (its profile's end), or of a profile part: "start"
     /// or "end".
     Tip(String),
+    /// Edge `edge` of the face with this id (or of "base").
+    Face(FaceEdge),
 }
 
 /// Which way the flange bends. On a base edge: `Up` toward +z. On a tip:
