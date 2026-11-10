@@ -481,8 +481,9 @@ pub(crate) fn cut(
         .into_iter()
         .enumerate()
         .map(|(i, (polygon, arcs))| Cell {
+            // `#`, not `.`: a contour's later steps are named `c.2`, `c.3`.
             name: if many {
-                format!("{}.{i}", cell.name)
+                format!("{}#{i}", cell.name)
             } else {
                 cell.name.clone()
             },

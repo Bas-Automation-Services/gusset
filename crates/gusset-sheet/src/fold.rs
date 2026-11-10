@@ -3517,6 +3517,44 @@ mod notch_hole_tests {
             assert!(crate::flat::flat_pattern(&spec).unwrap().holes.is_empty());
         }
     }
+
+    #[test]
+    fn a_hole_splitting_a_contours_strip_keeps_face_keys_apart() {
+        // The hole cuts the contour's first strip into three pieces; the
+        // third must not share a name with the contour's second step (c.2).
+        let spec: PartSpec = serde_json::from_str(
+            r#"{ "id": "t", "thickness": 2, "bend_radius": 3.8, "k_factor": 0.3,
+                 "base": { "outline": [[0,0],[117.6,0],[117.6,62],[0,62]],
+                           "holes": [{ "center": [112.4, 67.6], "diameter": 11 }] },
+                 "contours": [{ "id": "c", "on": { "base": 2 }, "face": "bottom",
+                                "profile": [[0,2],[0,15.2],[16.9,34.1]] }] }"#,
+        )
+        .unwrap();
+        let m = mass(&fold(&spec).unwrap(), 1e-3).unwrap();
+        let e = exact_mass(&spec).unwrap();
+        assert!(((m.volume - e.volume) / e.volume).abs() < 2e-5);
+    }
+
+    #[test]
+    fn a_hole_through_a_hems_corner_leaves_a_sliver_of_bend_that_meshes() {
+        // The hole cuts a sliver off the hem's bend at the corner; samples
+        // along its straight end mesh into a triangle seen edge-on.
+        let spec: PartSpec = serde_json::from_str(
+            r#"{ "id": "t", "thickness": 3, "bend_radius": 1.8, "k_factor": 0.5,
+                 "base": { "outline": [[0,0],[58.6,0],[58.6,32.4],[0,32.4]],
+                           "holes": [{ "center": [56, 32.5], "diameter": 8.4 }] },
+                 "flanges": [{ "id": "f", "on": { "base": 3 }, "angle": 107, "length": 13.7,
+                               "datum": "inner_ortho", "position": "outside", "side": "down" }],
+                 "hems": [{ "id": "h", "on": { "base": 2 }, "side": "down",
+                            "kind": { "single": { "gap": 0.7, "length": 8.7 } } }] }"#,
+        )
+        .unwrap();
+        let (brep, e) = (fold(&spec).unwrap(), exact_mass(&spec).unwrap());
+        for tolerance in [0.02, 0.002] {
+            let m = mass(&brep, tolerance).unwrap();
+            assert!(((m.volume - e.volume) / e.volume).abs() < 1e-3, "{tolerance}");
+        }
+    }
 }
 
 #[cfg(test)]

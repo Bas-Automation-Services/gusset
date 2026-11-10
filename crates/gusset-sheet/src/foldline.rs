@@ -445,10 +445,11 @@ fn beside(f: &Fold, span: Option<(f64, f64)>, c: &Cell) -> bool {
 }
 
 /// A piece's name: numbered from 0 when there are several, as a cut-out
-/// splitting a cell names its pieces, so names never repeat.
+/// splitting a cell names its pieces, so names never repeat (`#`, not `.`:
+/// a contour's later steps are named `c.2`, `c.3`).
 fn label(name: &str, n: usize, many: bool) -> String {
     if many {
-        format!("{name}.{n}")
+        format!("{name}#{n}")
     } else {
         name.to_string()
     }
