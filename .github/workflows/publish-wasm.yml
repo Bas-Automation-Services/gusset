@@ -1,0 +1,40 @@
+# Publishes crates/gusset-wasm to npm as `gusset-wasm` when a version tag is pushed.
+name: Publish gusset-wasm
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the crate version
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gusset-wasm") | .version')
+          if [ "${GITHUB_REF_NAME}" != "v${crate}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match gusset-wasm ${crate}; tag v${crate} or bump crates/gusset-wasm/Cargo.toml"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: cargo test --release --workspace
+      - run: wasm-pack build crates/gusset-wasm --target web --release
+      - run: npm publish --access public --provenance
+        working-directory: crates/gusset-wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
