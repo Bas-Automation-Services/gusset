@@ -32,8 +32,12 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC) needs npm 11.5.1 or later; Node 22 ships npm 10.
+      - run: npm install -g npm@11.21.1
       - run: cargo test --release --workspace
       - run: wasm-pack build crates/gusset-wasm --target web --release
+      # npm tries trusted publishing first and falls back to NPM_TOKEN; once trusted
+      # publishing is set up the secret is deleted and the token stays empty.
       - run: npm publish --access public --provenance
         working-directory: crates/gusset-wasm/pkg
         env:
