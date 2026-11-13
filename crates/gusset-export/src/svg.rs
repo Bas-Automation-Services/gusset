@@ -143,14 +143,15 @@ fn ring(points: &[[f64; 2]], arcs: &[Option<Arc>]) -> String {
                     sweep += std::f64::consts::TAU;
                 }
                 let r = dist(p, a.center);
-                // Counter-clockwise with y up is clockwise on screen: sweep flag 1.
+                // Flipping y keeps the turn as seen: counter-clockwise stays counter-clockwise on
+                // screen, and SVG's sweep flag 1 turns clockwise there, so ccw takes flag 0.
                 write!(
                     d,
                     "A{} {} 0 {} {} {} {}",
                     num(r),
                     num(r),
                     u8::from(sweep > std::f64::consts::PI),
-                    u8::from(a.ccw),
+                    u8::from(!a.ccw),
                     num(q[0]),
                     num(-q[1])
                 )
@@ -199,8 +200,9 @@ mod tests {
         ))
         .unwrap();
         let svg = flat_svg(&flat_pattern(&spec).unwrap());
-        // Two R10 quarter arcs, counter-clockwise (sweep flag 1), not large.
-        assert_eq!(svg.matches("A10 10 0 0 1").count(), 2, "{svg}");
+        // Two R10 quarter arcs, counter-clockwise, not large. Flipping y to draw keeps an arc's
+        // turn as seen, and SVG's sweep flag 1 turns clockwise on screen: these take flag 0.
+        assert_eq!(svg.matches("A10 10 0 0 0").count(), 2, "{svg}");
         assert!(svg.contains(r#"<circle class="hole" cx="50" cy="-30" r="5""#));
         assert!(svg.contains(r#"class="bend down""#));
         // Its note reads along the bend line, just above it.
