@@ -311,6 +311,40 @@ fn cone_part(r: &mut Rng) -> String {
     )
 }
 
+/// A cone with holes and rounded cut-outs somewhere in its flat pattern's
+/// box (those off the sheet are refused).
+fn cut_cone_part(r: &mut Rng) -> String {
+    let json = cone_part(r);
+    let plain: gusset_sheet::spec::PartSpec = serde_json::from_str(&json).unwrap();
+    let Ok(flat) = gusset_sheet::flat::flat_pattern(&plain) else {
+        return json;
+    };
+    let [lo, hi] = flat.bounds();
+    let at = |r: &mut Rng| [r.range(lo[0], hi[0]), r.range(lo[1], hi[1])];
+    let size = ((hi[0] - lo[0]).min(hi[1] - lo[1]) / 4.0).max(0.2);
+    let holes: Vec<String> = (0..1 + (r.next() * 4.0) as usize)
+        .map(|_| {
+            let c = at(r);
+            format!(r#"{{"center": [{}, {}], "diameter": {}}}"#, c[0], c[1], r.range(0.1, 1.0) * size)
+        })
+        .collect();
+    let cutouts: Vec<String> = (0..(r.next() * 3.0) as usize)
+        .map(|_| {
+            let c = at(r);
+            let (w, h) = (r.range(0.1, 1.0) * size, r.range(0.1, 1.0) * size);
+            format!(
+                r#"{{"outline": [[{}, {}], [{}, {}], [{}, {}], [{}, {}]], "bulges": [{}, {}, {}, {}]}}"#,
+                c[0], c[1], c[0] + w, c[1], c[0] + w, c[1] + h, c[0], c[1] + h,
+                r.range(-0.5, 0.5), r.range(-0.5, 0.5), 0.0, r.range(-0.5, 0.5)
+            )
+        })
+        .collect();
+    let mut part: serde_json::Value = serde_json::from_str(&json).unwrap();
+    part["base"]["holes"] = serde_json::from_str(&format!("[{}]", holes.join(","))).unwrap();
+    part["base"]["cutouts"] = serde_json::from_str(&format!("[{}]", cutouts.join(","))).unwrap();
+    part.to_string()
+}
+
 /// A plate with a few round or rectangular embosses that mostly fit, some
 /// next to a flange.
 fn emboss_part(r: &mut Rng) -> String {
@@ -657,6 +691,7 @@ fn main() {
             Ok("profile") => profile_part(&mut rng),
             Ok("fold") => folded_part(&mut rng),
             Ok("cone") => cone_part(&mut rng),
+            Ok("conecut") => cut_cone_part(&mut rng),
             Ok("emboss") => emboss_part(&mut rng),
             Ok("bend") => bend_part(&mut rng),
             Ok("placed") => placed_part(&mut rng),
@@ -667,6 +702,22 @@ fn main() {
             let flat = gusset_sheet::flat::flat_pattern(&part)?;
             let brep = gusset_sheet::fold::fold(&part)?;
             let exact = gusset_sheet::fold::exact_mass(&part)?;
+            if std::env::var("KIND").as_deref() == Ok("conecut") {
+                // OpenGeometry's curved-trim mesh leaves slivers off a cut
+                // cone's faces: only that it meshes, and lost volume.
+                let mut plain = part.clone();
+                plain.base.holes.clear();
+                plain.base.cutouts.clear();
+                let whole = gusset_sheet::fold::exact_mass(&plain)?;
+                gusset_sheet::fold::mass(&brep, 0.05)?;
+                if !(exact.volume < whole.volume && exact.volume > 0.0) {
+                    return Err(gusset_sheet::SheetError::Kernel(format!(
+                        "volume: {} cut from {}",
+                        exact.volume, whole.volume
+                    )));
+                }
+                return Ok(());
+            }
             let rel = |m: gusset_sheet::fold::Mass| (exact.volume - m.volume).abs() / exact.volume;
             // Small radii mesh coarsely: then a ten times finer mesh must
             // come at least five times closer.

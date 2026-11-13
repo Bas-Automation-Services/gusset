@@ -344,7 +344,7 @@
       ]
     },
     "Cone": {
-      "description": "A part rolled to a cone or cylinder segment around the z axis: the sheet\nbetween two coaxial arcs, one on z = 0 and one on z = height, both from +x\ncounter-clockwise by `sweep` (a lofted flange between two such arcs, or a\nstraight line rolled around an axis). The arcs lie on one face of the\nsheet; the sheet's ends are cut square to it, so an end of a cone is a\ncone too. The flat pattern is the developed neutral surface (at the\nK-factor): the edge from the arcs' start points runs from (0, 0) to (0, L),\nL the slant length, and the sheet unrolls towards +x, seen from outside.\nHoles and features on it aren't supported yet.",
+      "description": "A part rolled to a cone or cylinder segment around the z axis: the sheet\nbetween two coaxial arcs, one on z = 0 and one on z = height, both from +x\ncounter-clockwise by `sweep` (a lofted flange between two such arcs, or a\nstraight line rolled around an axis). The arcs lie on one face of the\nsheet; the sheet's ends are cut square to it, so an end of a cone is a\ncone too. The flat pattern is the developed neutral surface (at the\nK-factor): the edge from the arcs' start points runs from (0, 0) to (0, L),\nL the slant length, and the sheet unrolls towards +x, seen from outside.\nHoles, cut-outs and punches go in the flat pattern, inside the sheet (not\nacross its edges): rolled up, their walls stand square to the sheet.\nOther features on it aren't supported yet.",
       "type": "object",
       "properties": {
         "height": {

@@ -27,7 +27,8 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   bend cut exactly, with corner reliefs).
 - **Rolled cones and cylinders:** the sheet between two coaxial arcs (a lofted flange
   between them, or a straight line rolled around an axis), material on either side, unrolled
-  on its neutral surface.
+  on its neutral surface; holes, cut-outs and punches cut in the flat, their walls square to
+  the rolled sheet.
 - **Folds** along a line across the plate or a flange, nested, at any angle to the outline; **jogs**
   (Z-steps by an offset).
 - **Faces joined by bends:** plates on planes of their own, anywhere in 3D, each joined to the

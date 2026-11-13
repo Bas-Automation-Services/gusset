@@ -325,6 +325,7 @@ impl<'a> Model<'a> {
                 z: c.z,
             },
             radius: f.fold.radius + f.fold.k_factor * self.t,
+            semi_angle: 0.0,
         }
     }
 

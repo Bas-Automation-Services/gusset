@@ -811,7 +811,9 @@ pub struct Profile {
 /// cone too. The flat pattern is the developed neutral surface (at the
 /// K-factor): the edge from the arcs' start points runs from (0, 0) to (0, L),
 /// L the slant length, and the sheet unrolls towards +x, seen from outside.
-/// Holes and features on it aren't supported yet.
+/// Holes, cut-outs and punches go in the flat pattern, inside the sheet (not
+/// across its edges): rolled up, their walls stand square to the sheet.
+/// Other features on it aren't supported yet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Cone {
