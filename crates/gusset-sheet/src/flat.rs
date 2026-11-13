@@ -2712,6 +2712,42 @@ impl FlatPattern {
         [[x.0, y.0], [x.1, y.1]]
     }
 
+    /// Length of every cut, mm: the outline, the cut-outs (punch stamps
+    /// included) and the holes, measured on the lines and arcs the DXF writes.
+    pub fn cut_length(&self) -> f64 {
+        let ring_length = |pts: &[P2], curves: &[Option<Curve>]| -> f64 {
+            let (pts, arcs) = lines_and_arcs(pts, curves);
+            (0..pts.len())
+                .map(|k| {
+                    let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+                    match arcs[k] {
+                        None => dot(sub(b, a), sub(b, a)).sqrt(),
+                        Some(arc) => {
+                            dot(sub(a, arc.center), sub(a, arc.center)).sqrt()
+                                * arc.sweep(a, b).abs()
+                        }
+                    }
+                })
+                .sum()
+        };
+        ring_length(&self.outline, &self.outline_arcs)
+            + self
+                .cutouts
+                .iter()
+                .map(|c| ring_length(&c.points, &c.arcs))
+                .sum::<f64>()
+            + self
+                .holes
+                .iter()
+                .map(|h| std::f64::consts::PI * h.diameter)
+                .sum::<f64>()
+    }
+
+    /// Closed cuts the laser starts: the outline, each cut-out and each hole.
+    pub fn pierces(&self) -> usize {
+        1 + self.cutouts.len() + self.holes.len()
+    }
+
     /// Area of the flat blank: outline minus holes and cut-outs.
     pub fn area(&self) -> f64 {
         path_area(&self.outline, &self.outline_arcs)
@@ -3680,5 +3716,43 @@ mod tests {
             flat_pattern(&part("[]")),
             Err(SheetError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn cut_length_of_a_plate_is_its_outline_and_hole() {
+        let f = flat_pattern(&plate(Vec::new())).unwrap();
+        let expected = 2.0 * (100.0 + 60.0) + std::f64::consts::PI * 8.0;
+        assert!(
+            (f.cut_length() - expected).abs() < 1e-9,
+            "{}",
+            f.cut_length()
+        );
+        assert_eq!(f.pierces(), 2);
+    }
+
+    #[test]
+    fn cut_length_and_pierces_count_every_punch_stamp() {
+        // Two stamps of a 20 x 6 slot with round ends: 2 * (2 * 14 + 6 pi) each.
+        let mut spec = plate(Vec::new());
+        spec.base.punches = vec![crate::spec::Punch {
+            id: "slot".into(),
+            on: None,
+            at: vec![[50.0, 20.0], [50.0, 40.0]],
+            angle: 0.0,
+            holes: Vec::new(),
+            cutouts: vec![crate::spec::Cutout {
+                outline: vec![[-7.0, -3.0], [7.0, -3.0], [7.0, 3.0], [-7.0, 3.0]],
+                bulges: vec![0.0, 1.0, 0.0, 1.0],
+            }],
+        }];
+        let f = flat_pattern(&spec).unwrap();
+        let slot = 2.0 * 14.0 + std::f64::consts::PI * 6.0;
+        let expected = 2.0 * (100.0 + 60.0) + std::f64::consts::PI * 8.0 + 2.0 * slot;
+        assert!(
+            (f.cut_length() - expected).abs() < 1e-9,
+            "{}",
+            f.cut_length()
+        );
+        assert_eq!(f.pierces(), 4);
     }
 }

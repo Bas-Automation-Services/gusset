@@ -82,35 +82,38 @@ pub fn preview(json: &str) -> Result<Preview, JsError> {
     })
 }
 
-/// The flat blank's size (mm, along x and y) and its bends (feature, order,
-/// angle, inner radius, K-factor, up, length), as JSON.
+/// The flat blank's size (mm, along x and y), its cut length (mm) and
+/// pierces (closed cuts), and its bends (feature, order, angle, inner radius,
+/// K-factor, up, length, and the bend line's ends in the base frame), as JSON.
 #[wasm_bindgen]
 pub fn flat(json: &str) -> Result<String, JsError> {
     let f = kernel(flat_pattern(&part(json)?))?;
     let [lo, hi] = f.bounds();
-    let bends: Vec<String> = f
+    let bends: Vec<serde_json::Value> = f
         .bends
         .iter()
         .map(|b| {
             let d = [b.line[1][0] - b.line[0][0], b.line[1][1] - b.line[0][1]];
-            format!(
-                r#"{{"feature":{},"order":{},"angle":{},"inner_radius":{},"k_factor":{},"up":{},"length":{}}}"#,
-                serde_json::to_string(&b.flange).unwrap(),
-                b.order,
-                b.angle,
-                b.inner_radius,
-                b.k_factor,
-                b.up,
-                (d[0] * d[0] + d[1] * d[1]).sqrt()
-            )
+            serde_json::json!({
+                "feature": b.flange,
+                "order": b.order,
+                "angle": b.angle,
+                "inner_radius": b.inner_radius,
+                "k_factor": b.k_factor,
+                "up": b.up,
+                "length": (d[0] * d[0] + d[1] * d[1]).sqrt(),
+                "line": b.line,
+            })
         })
         .collect();
-    Ok(format!(
-        r#"{{"width":{},"height":{},"bends":[{}]}}"#,
-        hi[0] - lo[0],
-        hi[1] - lo[1],
-        bends.join(",")
-    ))
+    Ok(serde_json::json!({
+        "width": hi[0] - lo[0],
+        "height": hi[1] - lo[1],
+        "cut_length": f.cut_length(),
+        "pierces": f.pierces(),
+        "bends": bends,
+    })
+    .to_string())
 }
 
 /// Manufacturability findings as JSON: `[{rule, feature, value, limit,
@@ -280,5 +283,18 @@ mod tests {
         let p = preview(part).unwrap();
         assert!(!p.sheet.indices.is_empty() && !p.clash.indices.is_empty());
         assert_eq!(p.clash.positions.len(), p.clash.normals.len());
+    }
+
+    #[test]
+    fn flat_gives_the_cut_and_where_each_bend_lies() {
+        // One flange across the full top edge: the blank stays a rectangle.
+        let f: serde_json::Value = serde_json::from_str(&flat(PLATE).unwrap()).unwrap();
+        let (w, h) = (f["width"].as_f64().unwrap(), f["height"].as_f64().unwrap());
+        assert!((f["cut_length"].as_f64().unwrap() - 2.0 * (w + h)).abs() < 1e-9);
+        assert_eq!(f["pierces"].as_u64(), Some(1));
+        let line = &f["bends"][0]["line"];
+        let (a, b) = (&line[0], &line[1]);
+        assert_eq!(a[1].as_f64(), b[1].as_f64());
+        assert!(((a[0].as_f64().unwrap() - b[0].as_f64().unwrap()).abs() - 100.0).abs() < 1e-9);
     }
 }
