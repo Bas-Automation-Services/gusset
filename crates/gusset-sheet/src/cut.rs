@@ -616,6 +616,15 @@ pub(crate) fn cut_inner(
 /// Whether a ring meets the clip's boundary, or starts inside it (arcs of
 /// the ring checked at points along them).
 fn touches(clip: &Clip, ring: &Ring) -> bool {
+    // A profile partly inside the ring and partly outside crosses it (a
+    // long arc of the ring can pass between the samples below).
+    if let Clip::Profile(profile) = clip {
+        let mut sides = samples(profile).map(|x| inside(x, &ring.points, &ring.arcs));
+        let first = sides.next();
+        if sides.any(|s| Some(s) != first) {
+            return true;
+        }
+    }
     let n = ring.points.len();
     (0..n).any(|k| {
         let (a, b) = segment(ring, k);
@@ -637,6 +646,26 @@ fn touches(clip: &Clip, ring: &Ring) -> bool {
                 })
             }
         }
+    })
+}
+
+/// A ring's corners, and 31 points along each of its arcs.
+fn samples(ring: &Ring) -> impl Iterator<Item = P2> + '_ {
+    let n = ring.points.len();
+    (0..n).flat_map(move |k| {
+        let (a, b) = segment(ring, k);
+        let along = arc(ring.arcs[k]).map(|arc| {
+            let (r, a0, sweep) = (
+                dist(a, arc.center),
+                (a[1] - arc.center[1]).atan2(a[0] - arc.center[0]),
+                arc.sweep(a, b),
+            );
+            (1..32).map(move |i| {
+                let t = a0 + sweep * i as f64 / 32.0;
+                [arc.center[0] + r * t.cos(), arc.center[1] + r * t.sin()]
+            })
+        });
+        std::iter::once(a).chain(along.into_iter().flatten())
     })
 }
 
