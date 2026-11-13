@@ -425,11 +425,14 @@ enum End {
     /// remnant would be no longer than the minimum, also next to a straight
     /// edge) the notch's bottom runs on to the edge at `p`. `p` trims an arc.
     /// `round`: a round relief's run-on, a quarter circle from the strip's
-    /// side down to the notch bottom.
+    /// side down to the notch bottom. `partial`: the neighbouring notch's
+    /// bottom meets that quarter circle at `p` (round reliefs short on both
+    /// sides of a corner), so it runs only from the strip's side to `p`.
     RunOn {
         corner: Option<P2>,
         p: P2,
         round: bool,
+        partial: bool,
     },
     /// Two flanges meet: the bend runs to `bend`, the flange to `flange` at
     /// its start (positions along this edge), and on at `slope` per unit
@@ -966,6 +969,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                         corner: None,
                         p,
                         round,
+                        partial: false,
                     };
                     continue;
                 }
@@ -1084,7 +1088,12 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 let Some(p) = p.filter(|&p| along(p) <= along(to) + EPS) else {
                     return unsupported("running into an arc too small for its relief");
                 };
-                sides[i][side] = End::RunOn { corner, p, round };
+                sides[i][side] = End::RunOn {
+                    corner,
+                    p,
+                    round,
+                    partial: false,
+                };
                 continue;
             }
             // A strip's free end next to an edge that isn't square: the bend
@@ -1559,18 +1568,20 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             corner: ci,
             p: x,
             round: false,
+            partial: false,
         };
         sides[k][0] = End::RunOn {
             corner: ck,
             p: x,
             round: false,
+            partial: false,
         };
         crossed[j] = true;
     }
-    // Two notches running on into the same corner: both end where their
-    // bottoms cross, whichever flange comes first (straight and tear
-    // reliefs at a square corner; a round one's run-on meets the other's
-    // quarter circle).
+    // Two notches running on into the same corner, whichever flange comes
+    // first: the corner loses both notches. Their bottoms run on until they
+    // cross (straight and tear reliefs at a square corner), or a round
+    // one's bottom until it meets the other's quarter circle.
     for i in 0..n {
         let k = (i + 1) % n;
         let (End::RunOn { corner: None, .. }, End::RunOn { corner: None, .. }) =
@@ -1578,21 +1589,71 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         else {
             continue;
         };
-        if relief.shape == ReliefShape::Round || dot(edge(i).1, edge(k).1).abs() > EPS {
-            return Err(SheetError::Unsupported(format!(
+        let refuse = || {
+            Err(SheetError::Unsupported(format!(
                 "flanges on edges {i} and {k}: short remnants on both sides of the corner"
-            )));
+            )))
+        };
+        if dot(edge(i).1, edge(k).1).abs() > EPS {
+            return refuse();
         }
         let (si, sk) = (strips[i].unwrap(), strips[k].unwrap());
-        let (a1, d1) = (at(i, si.t1, si.setback - notch_depth), edge(i).1);
-        let (a2, d2) = (at(k, sk.t0, sk.setback - notch_depth), edge(k).1);
-        let x = add(a1, scale(d1, cross2(sub(a2, a1), d2) / cross2(d1, d2)));
-        let p = End::RunOn {
-            corner: None,
-            p: x,
-            round: false,
+        let round = relief.shape == ReliefShape::Round;
+        // Each notch's bottom from where it starts, towards the corner.
+        let r = if round { relief.width / 2.0 } else { 0.0 };
+        let (di, dk) = (si.setback - notch_depth, sk.setback - notch_depth);
+        let (bi, ui) = (at(i, si.t1 + r, di), edge(i).1);
+        let (bk, uk) = (at(k, sk.t0 - r, dk), scale(edge(k).1, -1.0));
+        // bi + l ui = bk + m uk.
+        let det = cross2(ui, uk);
+        let l = cross2(sub(bk, bi), uk) / det;
+        let m = cross2(sub(bk, bi), ui) / det;
+        let x = add(bi, scale(ui, l));
+        // Where a bottom from b along u first meets a quarter circle round c.
+        let on_circle = |b: P2, u: P2, c: P2| -> Option<P2> {
+            let w = sub(b, c);
+            let (bb, cc) = (dot(w, u), dot(w, w) - r * r);
+            let disc = bb * bb - cc;
+            (disc >= 0.0).then(|| add(b, scale(u, -bb - disc.sqrt())))
         };
-        (sides[i][1], sides[k][0]) = (p, p);
+        // The meeting point, and which quarter circle it cuts short.
+        let (p, partial_i, partial_k) = if !round || l >= -EPS && m >= -EPS {
+            (x, false, false)
+        } else if m < 0.0 && l >= 0.0 {
+            match on_circle(bi, ui, at(k, sk.t0 - r, dk + r)) {
+                Some(p) => (p, false, true),
+                None => return refuse(),
+            }
+        } else if l < 0.0 && m >= 0.0 {
+            match on_circle(bk, uk, at(i, si.t1 + r, di + r)) {
+                Some(p) => (p, true, false),
+                None => return refuse(),
+            }
+        } else {
+            // Each bottom starts past the other's: the quarter circles meet,
+            // on the plate's side of the corner (away from it).
+            let (ci, ck) = (at(i, si.t1 + r, di + r), at(k, sk.t0 - r, dk + r));
+            let d = dist(ci, ck);
+            if d >= 2.0 * r || d < EPS {
+                return refuse();
+            }
+            let mid = scale(add(ci, ck), 0.5);
+            let h = (r * r - d * d / 4.0).sqrt();
+            let across = scale([ci[1] - ck[1], ck[0] - ci[0]], h / d);
+            let vertex = base[k];
+            let p = [add(mid, across), sub(mid, across)]
+                .into_iter()
+                .max_by(|a, b| dist(*a, vertex).total_cmp(&dist(*b, vertex)))
+                .unwrap();
+            (p, true, true)
+        };
+        let end = |partial| End::RunOn {
+            corner: None,
+            p,
+            round,
+            partial,
+        };
+        (sides[i][1], sides[k][0]) = (end(partial_i), end(partial_k));
     }
 
     // Span of a strip's bend and of its flange along the edge.
@@ -1887,6 +1948,26 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             );
         }
     };
+    // A round notch's quarter circle cut short at p: from p to the strip's
+    // side at its start, or from the strip's side to p at its end.
+    let part_quarter = |path: &mut Path, i: usize, st: &Strip, start: bool, p: P2| {
+        let (r, depth) = (relief.width / 2.0, st.setback - relief.depth);
+        let (t, c) = if start {
+            (st.t0, st.t0 - r)
+        } else {
+            (st.t1, st.t1 + r)
+        };
+        let (side, centre) = (at(i, t, depth + r), at(i, c, depth + r));
+        let (from, to) = if start {
+            (p, side)
+        } else {
+            path.line(side);
+            (side, p)
+        };
+        let mid = add(sub(from, centre), sub(to, centre));
+        let via = add(centre, scale(mid, r / dist(mid, [0.0, 0.0])));
+        path.arc(to, centre, via);
+    };
     // A tear's flat closes the corner after edge i: the two flange edges run
     // on until they meet.
     let meet = |i: usize| {
@@ -1961,12 +2042,19 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             End::RunOn {
                 corner: Some(_), ..
             } if torn => outline.line(at(i, st.t0, 0.0)),
-            End::RunOn { corner, p, round } => {
+            End::RunOn {
+                corner,
+                p,
+                round,
+                partial,
+            } => {
                 outline.line(p);
                 if let Some(c) = corner {
                     outline.line(c);
                 }
-                if round {
+                if partial {
+                    part_quarter(&mut outline, i, &st, true, p);
+                } else if round {
                     quarter(&mut outline, i, &st, true, corner.is_some());
                 } else {
                     outline.line(at(i, st.t0, st.setback - notch_depth));
@@ -2050,8 +2138,15 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 outline.line(at(i, st.t1, 0.0));
                 *outline.arcs.last_mut().unwrap() = base_arcs[(i + 1) % n].map(Curve::Arc);
             }
-            End::RunOn { corner, p, round } => {
-                if round {
+            End::RunOn {
+                corner,
+                p,
+                round,
+                partial,
+            } => {
+                if partial {
+                    part_quarter(&mut outline, i, &st, false, p);
+                } else if round {
                     quarter(&mut outline, i, &st, false, corner.is_some());
                 } else {
                     outline.line(at(i, st.t1, st.setback - notch_depth));
@@ -2103,11 +2198,14 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 corner,
                 p: q,
                 round,
+                partial,
             },
         ) = (strips[prev], sides[prev][1])
         {
             base_cell.line(at(prev, span(prev, &p).0[1], p.setback));
-            if round {
+            if partial {
+                part_quarter(&mut base_cell, prev, &p, false, q);
+            } else if round {
                 quarter(&mut base_cell, prev, &p, false, corner.is_some());
             } else {
                 base_cell.line(at(prev, p.t1, depth(&p)));
@@ -2131,12 +2229,24 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         };
         match (strips[i], strips[prev], sides[i][0], sides[prev][1]) {
             // Along the neighbouring edge to a notch that runs on.
-            (Some(st), _, End::RunOn { corner, p, round }, _) => {
+            (
+                Some(st),
+                _,
+                End::RunOn {
+                    corner,
+                    p,
+                    round,
+                    partial,
+                },
+                _,
+            ) => {
                 base_cell.line(p);
                 if let Some(c) = corner {
                     base_cell.line(c);
                 }
-                if round {
+                if partial {
+                    part_quarter(&mut base_cell, i, &st, true, p);
+                } else if round {
                     quarter(&mut base_cell, i, &st, true, corner.is_some());
                 } else {
                     base_cell.line(at(i, st.t0, depth(&st)));
@@ -3078,8 +3188,8 @@ mod tests {
     fn short_remnants_on_both_sides_of_a_corner_cross() {
         // Both notches run on into the corner at (0, 0): their bottoms (3
         // inside both edges) end where they cross, in either order (a fuzz
-        // find, once refused). A round relief's run-on meets the other's
-        // quarter circle instead (not built).
+        // find, once refused). Round ones too here, keeping both quarter
+        // circles.
         let part = |relief: &str, flipped: bool| -> PartSpec {
             let (f0, f3) = (
                 r#"{ "id": "f0", "on": { "base": 0 }, "width": { "offset_start": 5, "offset_end": 10 },
@@ -3101,12 +3211,91 @@ mod tests {
         assert!(flat.outline.iter().any(|p| dist(*p, [3.0, 3.0]) < 1e-9));
         let flipped = flat_pattern(&part("straight", true)).unwrap();
         assert!((flat.area() - flipped.area()).abs() < 1e-9);
-        assert_eq!(
-            flat_pattern(&part("round", false)).unwrap_err(),
-            SheetError::Unsupported(
-                "flanges on edges 3 and 0: short remnants on both sides of the corner".into()
-            )
-        );
+        let round = flat_pattern(&part("round", false)).unwrap();
+        assert!(round.outline.iter().any(|p| dist(*p, [3.0, 3.0]) < 1e-9));
+        // Six corners kept: the two quarter circles here, and two of each
+        // half circle at the flanges' far ends.
+        let corners = 6.0 * (1.0 - std::f64::consts::PI / 4.0);
+        assert!((round.area() - flat.area() - corners).abs() < 1e-9);
+    }
+
+    #[test]
+    fn round_reliefs_short_on_both_sides_of_a_corner_meet() {
+        // f on edge 2 ends s from the corner (100, 60), g on edge 1 e from
+        // it; round reliefs 2 wide, 1.5 deep: notch bottoms at y 56.5 and
+        // x 96.5, quarter circles round (100 - s - 1, 57.5) and (97.5,
+        // 60 - e - 1). A bottom meets the other's quarter circle, or both
+        // circles meet, or the bottoms cross; either build order. The
+        // reference CAD's flat area and folded volume.
+        let part = |s: f64, e: f64, flipped: bool| -> PartSpec {
+            let (f, g) = (
+                format!(
+                    r#"{{ "id": "f", "on": {{ "base": 2 }}, "width": {{ "offset_start": {s}, "offset_end": 30 }},
+                     "angle": 90, "length": 30, "datum": "outer", "position": "outside", "side": "up" }}"#
+                ),
+                format!(
+                    r#"{{ "id": "g", "on": {{ "base": 1 }}, "width": {{ "offset_start": 30, "offset_end": {e} }},
+                     "angle": 90, "length": 30, "datum": "outer", "position": "outside", "side": "up" }}"#
+                ),
+            );
+            let flanges = if flipped { [g, f] } else { [f, g] };
+            serde_json::from_str(&format!(
+                r#"{{ "id": "a", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "relief": {{ "shape": "round", "width": 2, "depth": 1.5, "minimum_remnant": 4 }},
+                "base": {{ "outline": [[0,0],[100,0],[100,60],[0,60]] }},
+                "flanges": [{}, {}] }}"#,
+                flanges[0], flanges[1]
+            ))
+            .unwrap()
+        };
+        let (h, q) = (0.75f64.sqrt(), 0.4375f64.sqrt());
+        for (s, e, meet, area, volume) in [
+            (
+                5.0,
+                4.0,
+                [97.5 - h, 56.5],
+                8552.2548208257,
+                17161.686627946736,
+            ),
+            (
+                4.0,
+                5.0,
+                [96.5, 57.5 - h],
+                8552.2548208257,
+                17161.686627946732,
+            ),
+            (
+                4.0,
+                4.0,
+                [97.25 - q, 57.25 - q],
+                8584.143056927587,
+                17226.091418681222,
+            ),
+            (
+                6.0,
+                6.0,
+                [96.5, 56.5],
+                8456.581825941877,
+                16968.455682586933,
+            ),
+        ] {
+            for flipped in [false, true] {
+                let spec = part(s, e, flipped);
+                let flat = flat_pattern(&spec).unwrap();
+                assert!(
+                    flat.outline.iter().any(|p| dist(*p, meet) < 1e-9),
+                    "{s} {e}: {:?}",
+                    flat.outline
+                );
+                assert!(
+                    (flat.area() - area).abs() < 1e-6,
+                    "{s} {e}: {}",
+                    flat.area()
+                );
+                let m = crate::fold::exact_mass(&spec).unwrap();
+                assert!((m.volume - volume).abs() < 1e-6, "{s} {e}: {}", m.volume);
+            }
+        }
     }
 
     #[test]

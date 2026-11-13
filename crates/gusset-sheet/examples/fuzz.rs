@@ -311,6 +311,45 @@ fn cone_part(r: &mut Rng) -> String {
     )
 }
 
+/// Two partial flanges ending close to one corner of a plate (short
+/// remnants on one or both sides), with any relief.
+fn corner_part(r: &mut Rng) -> String {
+    let t = [1.0, 1.5, 2.0, 3.0][(r.next() * 4.0) as usize % 4];
+    let (w, h) = (r.range(40.0, 150.0), r.range(40.0, 120.0));
+    let width = r.range(0.5, 4.0);
+    let shape = r.pick(&["round", "round", "straight", "tear"]);
+    let depth = width / 2.0 + r.range(0.0, 3.0);
+    let flange = |r: &mut Rng, id: &str, edge: usize, start: f64, end: f64| {
+        format!(
+            r#"{{"id": "{id}", "on": {{"base": {edge}}}, "width": {{"offset_start": {start}, "offset_end": {end}}},
+               "angle": {}, "length": {}, "datum": "outer", "position": "{}", "side": "{}"}}"#,
+            if r.chance(0.6) { 90.0 } else { r.range(30.0, 150.0) },
+            r.range(8.0, 30.0),
+            r.pick(&["outside", "outside", "inside"]),
+            r.pick(&["up", "up", "down"])
+        )
+    };
+    let (f_start, f_end) = (r.range(0.2, 9.0), r.range(5.0, 20.0));
+    let (g_start, g_end) = (r.range(5.0, 20.0), r.range(0.2, 9.0));
+    let mut flanges = vec![
+        flange(r, "f", 2, f_start, f_end),
+        flange(r, "g", 1, g_start, g_end),
+    ];
+    if r.chance(0.5) {
+        flanges.reverse();
+    }
+    format!(
+        r#"{{"id": "corner", "thickness": {t}, "bend_radius": {}, "k_factor": {},
+            "relief": {{"shape": "{shape}", "width": {width}, "depth": {depth}, "minimum_remnant": {}}},
+            "base": {{"outline": [[0, 0], [{w}, 0], [{w}, {h}], [0, {h}]]}},
+            "flanges": [{}]}}"#,
+        r.range(0.5, 5.0),
+        r.range(0.25, 0.5),
+        r.range(0.5, 10.0),
+        flanges.join(",")
+    )
+}
+
 /// A cone with holes and rounded cut-outs somewhere in its flat pattern's
 /// box (those off the sheet are refused).
 fn cut_cone_part(r: &mut Rng) -> String {
@@ -692,6 +731,7 @@ fn main() {
             Ok("fold") => folded_part(&mut rng),
             Ok("cone") => cone_part(&mut rng),
             Ok("conecut") => cut_cone_part(&mut rng),
+            Ok("corner") => corner_part(&mut rng),
             Ok("emboss") => emboss_part(&mut rng),
             Ok("bend") => bend_part(&mut rng),
             Ok("placed") => placed_part(&mut rng),
