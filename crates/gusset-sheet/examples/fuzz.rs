@@ -5,8 +5,9 @@
 //!     cargo run --release --example fuzz -- <count> <seed>
 //!     SAFE=1 cargo run --release --example fuzz -- 1000 7   (fewer self-intersecting parts)
 //!     WHY=1 ...                                             (print each refusal and its part)
-//!     KIND=profile|fold|cone|emboss|bend ...                (profiles, fold lines, rolled cones, embosses,
-//!                                                           faces joined by bends)
+//!     KIND=profile|fold|cone|emboss|bend|placed ...         (profiles, fold lines, rolled cones, embosses,
+//!                                                           faces joined by bends, embosses and punches
+//!                                                           on flanges)
 //!
 //! Without SAFE many parts fold into themselves (flanges past 90 degrees into a
 //! neighbour); Gusset refuses those (`clash`).
@@ -378,6 +379,95 @@ fn emboss_part(r: &mut Rng) -> String {
     )
 }
 
+/// A plate with flanges at any angle on two of its edges, and embosses
+/// and punches placed on them (`on`), mostly on their flats.
+fn placed_part(r: &mut Rng) -> String {
+    let t = [1.0, 1.5, 2.0, 3.0][(r.next() * 4.0) as usize % 4];
+    let (w, h) = (r.range(80.0, 200.0), r.range(60.0, 150.0));
+    let mut flanges = Vec::new();
+    let mut embosses = Vec::new();
+    let mut punches = Vec::new();
+    for (k, edge, len) in [(0, 0, w), (1, 2, w)] {
+        if k == 1 && r.chance(0.4) {
+            continue;
+        }
+        let height = r.range(25.0, 90.0);
+        flanges.push(format!(
+            r#"{{"id": "f{k}", "on": {{"base": {edge}}}, "angle": {}, "length": {height},
+                "datum": "outer", "position": "{}", "side": "{}"}}"#,
+            r.range(20.0, 160.0),
+            r.pick(&["inside", "outside"]),
+            r.pick(&["up", "down"]),
+        ));
+        // Embosses on the flange's first half, punches on its second.
+        {
+            let i = 0;
+            let draft = r.range(0.0, 45.0);
+            let k_ = ((90.0 - draft) / 2.0).to_radians().tan();
+            let half = (2.0 + t) * (1.0 + k_) + r.range(0.5, 6.0);
+            let lift = (4.0 + t) * k_ * draft.to_radians().cos() + r.range(0.5, 6.0);
+            let foot = half + lift * draft.to_radians().tan() + 2.0 * k_;
+            let at = [
+                r.range(foot.min(len / 4.0), (len / 2.0 - foot).max(len / 4.0)),
+                r.range(foot.min(height / 2.0), (height - foot).max(height / 2.0)),
+            ];
+            let shape = if r.chance(0.5) {
+                format!(
+                    r#"{{"rectangle": {{"width": {}, "length": {}, "corner_radius": {half}}}}}"#,
+                    2.0 * half + r.range(0.1, 10.0),
+                    2.0 * half + r.range(0.1, 10.0)
+                )
+            } else {
+                format!(r#"{{"round": {{"diameter": {}}}}}"#, 2.0 * half)
+            };
+            embosses.push(format!(
+                r#"{{"id": "e{k}{i}", "on": "f{k}", "at": [{}, {}], "shape": {shape},
+                "height": {lift}, "draft": {draft}, "side": "{}", "angle": {}}}"#,
+                at[0],
+                at[1],
+                r.pick(&["up", "down"]),
+                r.range(0.0, 180.0),
+            ));
+        }
+        let size = r.range(1.5, 5.0);
+        let n = 1 + (r.next() * 3.0) as usize;
+        let stamps: Vec<String> = (0..n)
+            .map(|j| {
+                let slot = (len / 2.0 - 10.0) / n as f64;
+                format!(
+                    "[{}, {}]",
+                    len / 2.0 + 5.0 + slot * (j as f64 + r.range(0.3, 0.7)),
+                    r.range(4.0 * size, height - 2.0 * size)
+                )
+            })
+            .collect();
+        punches.push(format!(
+            r#"{{"id": "p{k}", "on": "f{k}", "at": [{}], "angle": {},
+                "holes": [{{"center": [0, {}], "diameter": {}}}],
+                "cutouts": [{{"outline": [[{}, {}], [{}, {}], [{}, 0], [{}, 0]], "bulges": [0, 0.5, 0, 0]}}]}}"#,
+            stamps.join(", "),
+            r.range(0.0, 360.0),
+            size * 1.5,
+            size * 0.8,
+            -size,
+            -size * 0.6,
+            size,
+            -size * 0.6,
+            size,
+            -size,
+        ));
+    }
+    format!(
+        r#"{{"id": "placed", "thickness": {t}, "bend_radius": 2, "k_factor": 0.4,
+            "base": {{"outline": [[0, 0], [{w}, 0], [{w}, {h}], [0, {h}]],
+                      "embosses": [{}], "punches": [{}]}},
+            "flanges": [{}]}}"#,
+        embosses.join(","),
+        punches.join(","),
+        flanges.join(",")
+    )
+}
+
 type V3 = [f64; 3];
 
 fn v_add(a: V3, b: V3) -> V3 {
@@ -569,6 +659,7 @@ fn main() {
             Ok("cone") => cone_part(&mut rng),
             Ok("emboss") => emboss_part(&mut rng),
             Ok("bend") => bend_part(&mut rng),
+            Ok("placed") => placed_part(&mut rng),
             _ => spec(&mut rng),
         };
         let part: gusset_sheet::spec::PartSpec = serde_json::from_str(&json).unwrap();

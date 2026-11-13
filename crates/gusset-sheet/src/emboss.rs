@@ -9,12 +9,12 @@
 //! a hole the shape of the footprint, where the sheet leaves it.
 
 use crate::flat::{Arc, Curve, Ring, P2};
-use crate::fold::{Mass, GAUSS, P3};
+use crate::fold::{Mass, Rigid, GAUSS, P3};
 use crate::spec::{Emboss, EmbossShape, Hole, Side};
 use crate::SheetError;
 use opengeometry::brep::{
     boundary, plane_boundary, projected_boundary, uv_line, Builder, CurveGeometry, Frame3,
-    GeometryError, Orientation, Surface, SurfaceGeometry,
+    GeometryError, Orientation, Surface, SurfaceGeometry, Use,
 };
 use opengeometry::math::Interval;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -426,9 +426,11 @@ impl Formed {
     pub fn build_round(
         &self,
         b: &mut Builder,
+        m: Rigid,
         circles: [u32; 2],
         v: [u32; 2],
     ) -> Result<(), GeometryError> {
+        let b = &mut Moved { b, m };
         let Plan::Round(half) = self.plan else {
             unreachable!()
         };
@@ -479,7 +481,7 @@ impl Formed {
                 z: [0.0, 0.0, up],
             };
             let (circle, vertex) = rings[3];
-            let use_ = plane_boundary(b, frame, circle, vertex, vertex, Orientation::Forward)?;
+            let use_ = b.plane_boundary(frame, circle, vertex, vertex, Orientation::Forward)?;
             let r = half + self.top + 1.0;
             b.face(
                 &format!("{}.{level}.top", self.id),
@@ -495,7 +497,7 @@ impl Formed {
     /// its two ends, with a seam along it at angle 0.
     fn band(
         &self,
-        b: &mut Builder,
+        b: &mut Moved,
         key: &str,
         m: Meridian,
         out: P2,
@@ -598,9 +600,11 @@ impl Formed {
     pub fn build_rect(
         &self,
         b: &mut Builder,
+        m: Rigid,
         vertices: [[u32; 8]; 2],
         edges: [[(u32, u32); 8]; 2],
     ) -> Result<(), GeometryError> {
+        let b = &mut Moved { b, m };
         let Plan::Rect { rc, .. } = self.plan else {
             unreachable!()
         };
@@ -717,8 +721,7 @@ impl Formed {
                         } else {
                             Orientation::Reverse
                         };
-                        uses.push(projected_boundary(
-                            b,
+                        uses.push(b.projected_boundary(
                             &surface,
                             id,
                             from,
@@ -772,7 +775,7 @@ impl Formed {
                 } else {
                     Orientation::Reverse
                 };
-                uses.push(plane_boundary(b, frame, id, from, to, sense)?);
+                uses.push(b.plane_boundary(frame, id, from, to, sense)?);
             }
             let Plan::Rect { hw, hl, .. } = self.plan else {
                 unreachable!()
@@ -845,6 +848,94 @@ impl Formed {
                 revolved([c[0], c[1], 0.0], away, [rc + a[0], a[1]], dir).0
             }
         }
+    }
+}
+
+/// A builder that moves everything built into it by `m`: an emboss is
+/// worked out in the flat pattern's frame and moved with its plate. Surface
+/// parameters don't change, so projections onto the unmoved surface hold.
+struct Moved<'a> {
+    b: &'a mut Builder,
+    m: Rigid,
+}
+
+impl Moved<'_> {
+    fn frame(&self, f: Frame3) -> Frame3 {
+        Frame3 {
+            origin: self.m.apply(f.origin),
+            x: self.m.rot(f.x),
+            y: self.m.rot(f.y),
+            z: self.m.rot(f.z),
+        }
+    }
+
+    fn surface(&self, s: &SurfaceGeometry) -> SurfaceGeometry {
+        let mut s = s.clone();
+        match &mut s {
+            SurfaceGeometry::Plane { frame }
+            | SurfaceGeometry::Cylinder { frame, .. }
+            | SurfaceGeometry::Cone { frame, .. }
+            | SurfaceGeometry::Torus { frame, .. } => *frame = self.frame(*frame),
+            _ => unreachable!("an emboss has no other surfaces"),
+        }
+        s
+    }
+
+    fn vertex(&mut self, p: P3) -> u32 {
+        self.b.vertex(self.m.apply(p))
+    }
+
+    fn edge(&mut self, curve: CurveGeometry, range: Interval, seam: bool) -> u32 {
+        let curve = match curve {
+            CurveGeometry::Line { origin, direction } => CurveGeometry::Line {
+                origin: self.m.apply(origin),
+                direction: self.m.rot(direction),
+            },
+            CurveGeometry::Circle { frame, radius } => CurveGeometry::Circle {
+                frame: self.frame(frame),
+                radius,
+            },
+            _ => unreachable!("an emboss has no other curves"),
+        };
+        self.b.edge(curve, range, seam)
+    }
+
+    fn face(
+        &mut self,
+        key: &str,
+        surface: SurfaceGeometry,
+        bounds: [[f64; 2]; 2],
+        uses: Vec<Use>,
+    ) -> Result<u32, GeometryError> {
+        let surface = self.surface(&surface);
+        self.b.face(key, surface, bounds, uses)
+    }
+
+    fn set_face_sense(&mut self, face: u32, sense: Orientation) -> Result<(), GeometryError> {
+        self.b.set_face_sense(face, sense)
+    }
+
+    fn plane_boundary(
+        &self,
+        frame: Frame3,
+        edge: u32,
+        from: u32,
+        to: u32,
+        sense: Orientation,
+    ) -> Result<Use, GeometryError> {
+        plane_boundary(self.b, self.frame(frame), edge, from, to, sense)
+    }
+
+    fn projected_boundary(
+        &self,
+        surface: &SurfaceGeometry,
+        edge: u32,
+        from: u32,
+        to: u32,
+        sense: Orientation,
+        hint: Option<[f64; 2]>,
+    ) -> Result<Use, GeometryError> {
+        projected_boundary(self.b, &self.surface(surface), edge, from, to, sense, hint)
     }
 }
 
@@ -1051,19 +1142,102 @@ mod tests {
         let across =
             crate::flat::flat_pattern(&part(&rect([98.0, 24.0, 8.0], 5.0, 20.0, "up", 0.0), ""));
         assert!(matches!(across, Err(SheetError::Invalid(_))), "{across:?}");
-        // Over a bend, or on a flange.
+        // Over a bend; on the base or the flange (in the flat) it builds.
         let flange = r#"{"id": "f", "on": {"base": 2}, "angle": 90, "length": 50,
             "datum": "outer", "position": "outside", "side": "up"}"#;
-        assert!(crate::flat::flat_pattern(&part(
-            &round([50.0, 30.0], 30.0, 6.0, 30.0, "up"),
-            flange
-        ))
-        .is_ok());
-        for y in [55.0, 85.0] {
-            assert!(matches!(
-                crate::flat::flat_pattern(&part(&round([50.0, y], 30.0, 6.0, 30.0, "up"), flange)),
-                Err(SheetError::Unsupported(_))
-            ));
+        for y in [30.0, 85.0] {
+            let spec = part(&round([50.0, y], 30.0, 6.0, 30.0, "up"), flange);
+            crate::fold::fold(&spec).unwrap();
+        }
+        assert!(matches!(
+            crate::flat::flat_pattern(&part(&round([50.0, 55.0], 30.0, 6.0, 30.0, "up"), flange)),
+            Err(SheetError::Unsupported(_))
+        ));
+        // On a flange, reaching into its bend.
+        let on = round([50.0, 12.0], 30.0, 6.0, 30.0, "up")
+            .replace(r#""id": "d","#, r#""id": "d", "on": "f","#);
+        assert!(matches!(
+            crate::flat::flat_pattern(&part(&on, flange)),
+            Err(SheetError::Unsupported(_))
+        ));
+    }
+
+    /// An emboss on a flange (edge 0, along +x; up from the outer mold line)
+    /// moves with it: the solid meshes to its exact mass, and the raised
+    /// face lies `height` off the flange's face on its side, centred where
+    /// it was put.
+    #[test]
+    fn an_emboss_on_a_flange_moves_with_it() {
+        let flange = |angle: f64, side: &str| {
+            format!(
+                r#"{{"id": "f", "on": {{"base": 0}}, "angle": {angle}, "length": 50,
+                "datum": "outer", "position": "outside", "side": "{side}"}}"#
+            )
+        };
+        let round = |side: &str| {
+            format!(
+                r#"{{"id": "d", "on": "f", "at": [50, 25], "shape": {{"round": {{"diameter": 24}}}},
+                "height": 8, "draft": 20, "side": "{side}"}}"#
+            )
+        };
+        let rect = |side: &str| {
+            format!(
+                r#"{{"id": "r", "on": "f", "at": [50, 25], "shape": {{"rectangle": {{"width": 30,
+                "length": 20, "corner_radius": 8}}}}, "height": 8, "draft": 20, "side": "{side}",
+                "angle": 0}}"#
+            )
+        };
+        // Flange angle and side, emboss side; for the square flanges the
+        // raised face's plane (y) and centre (x, z).
+        let cases = [
+            // Up: the face's normal points out (-y); the outer face at y = -2.
+            (90.0, "up", "up", Some((-10.0, 25.0))),
+            (90.0, "up", "down", Some((8.0, 25.0))),
+            // Down: normal in (+y), the inner face at y = 0; up from the top.
+            (90.0, "down", "up", Some((8.0, -23.0))),
+            (90.0, "down", "down", Some((-10.0, -23.0))),
+            (60.0, "up", "up", None),
+            (120.0, "down", "down", None),
+        ];
+        for (angle, fside, eside, expect) in cases {
+            for emboss in [round(eside), rect(eside)] {
+                let spec = part(&emboss, &flange(angle, fside));
+                let what = format!("{angle} {fside} {eside} {}", &emboss[8..9]);
+                let solid = crate::fold::fold(&spec).unwrap_or_else(|e| panic!("{what}: {e}"));
+                let exact = crate::fold::exact_mass(&spec).unwrap();
+                let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+                let rel = |a: f64, b: f64| (a - b).abs() / b;
+                assert!(rel(mesh.volume, exact.volume) < 2e-5, "{what}: volume");
+                assert!(rel(mesh.area, exact.area) < 2e-5, "{what}: area");
+                for j in 0..3 {
+                    let d = (mesh.center_of_mass[j] - exact.center_of_mass[j]).abs();
+                    assert!(d < 1e-3, "{what}: centre");
+                }
+                let Some((y, z)): Option<(f64, f64)> = expect else {
+                    continue;
+                };
+                // The raised face: the vertices furthest along y that way,
+                // clear of the base plate.
+                let m = opengeometry::tessellation::tessellate(&solid, 1e-3, 10_000_000).unwrap();
+                let pts: Vec<[f64; 3]> = m
+                    .positions
+                    .chunks_exact(3)
+                    .map(|p| [p[0], p[1], p[2]])
+                    .filter(|p| (p[2] - z).abs() < 20.0)
+                    .collect();
+                let far = pts
+                    .iter()
+                    .map(|p| p[1] * y.signum())
+                    .fold(f64::MIN, f64::max)
+                    * y.signum();
+                assert!((far - y).abs() < 1e-9, "{what}: raised face at y = {far}");
+                let top: Vec<_> = pts.iter().filter(|p| (p[1] - y).abs() < 1e-9).collect();
+                for (k, want) in [(0, 50.0), (2, z)] {
+                    let lo = top.iter().map(|p| p[k]).fold(f64::MAX, f64::min);
+                    let hi = top.iter().map(|p| p[k]).fold(f64::MIN, f64::max);
+                    assert!(((lo + hi) / 2.0 - want).abs() < 1e-6, "{what}: centre {k}");
+                }
+            }
         }
     }
 

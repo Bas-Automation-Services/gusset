@@ -7,7 +7,8 @@
 
 use crate::cut::Clip;
 use crate::spec::{
-    CornerCut, CornerShape, EdgeRef, Hole, PartSpec, ReliefShape, Seam, Side, Transition,
+    CornerCut, CornerShape, EdgeRef, Frame2, Hole, PartSpec, Punch, ReliefShape, Seam, Side,
+    Transition,
 };
 use crate::SheetError;
 
@@ -81,6 +82,19 @@ impl Ring {
         Ring {
             points: c.outline.clone(),
             arcs,
+        }
+    }
+
+    /// A hole's circle, as two half circles.
+    pub fn from_hole(h: &Hole) -> Ring {
+        let (c, r) = (h.center, h.diameter / 2.0);
+        let arc = Some(Curve::Arc(Arc {
+            center: c,
+            ccw: true,
+        }));
+        Ring {
+            points: vec![[c[0] + r, c[1]], [c[0] - r, c[1]]],
+            arcs: vec![arc, arc],
         }
     }
 
@@ -2419,11 +2433,55 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     // face is flat from there to the next bend).
     let mut holes = spec.base.holes.clone();
     let mut cutouts: Vec<Ring> = spec.base.cutouts.iter().map(Ring::from_cutout).collect();
+    // A flange's face: [along, up] into the flat, along the edge as they are,
+    // up from the bend's end less its outer setback (the face is flat from
+    // there to the next bend); and a check that a flat extent across the
+    // edge (lowest, highest distance from it) stays on that flat.
+    let face = |on: &str, what: &str| {
+        let mut found = folds.iter().enumerate().filter(|(_, f)| f.flange == on);
+        let (Some((k, f)), None, true) = (
+            found.next(),
+            found.next(),
+            spec.flanges.iter().any(|g| g.id == on),
+        ) else {
+            return Err(SheetError::Invalid(format!("{what}: no flange {on}")));
+        };
+        let start = f.s0 + f.bend_allowance;
+        let setback = (f.radius + spec.thickness) * (f.angle / 2.0).tan();
+        let next = folds
+            .iter()
+            .filter(|g| g.parent == Some(k))
+            .map(|g| g.s0)
+            .fold(f64::INFINITY, f64::min);
+        let frame = Frame2 {
+            o: add(f.edge_point, scale(f.n, start - setback)),
+            x: f.u,
+            y: f.n,
+        };
+        let (edge, n) = (f.edge_point, f.n);
+        let what = format!("{what} on {on}");
+        let on_face = move |ring: &Ring| {
+            let (lo, hi) = extent_along(ring, n, edge);
+            if lo < start - EPS || hi > next + EPS {
+                return Err(SheetError::Unsupported(format!(
+                    "{what}: reaching into a bend"
+                )));
+            }
+            Ok(())
+        };
+        Ok((frame, on_face))
+    };
     let embosses = spec
         .base
         .embosses
         .iter()
-        .map(|e| crate::emboss::Formed::new(e, spec.thickness, spec.bend_radius))
+        .map(|e| {
+            let placed = match &e.on {
+                Some(on) => e.placed(&face(on, &format!("emboss {}", e.id))?.0),
+                None => e.clone(),
+            };
+            crate::emboss::Formed::new(&placed, spec.thickness, spec.bend_radius)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut punches = Vec::new();
     for p in &spec.base.punches {
@@ -2433,10 +2491,23 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 p.id
             )));
         }
+        let (p, on_face) = match &p.on {
+            Some(on) => {
+                let (frame, on_face) = face(on, &format!("punch {}", p.id))?;
+                (p.placed(&frame), Some(on_face))
+            }
+            None => (p.clone(), None),
+        };
         for &at in &p.at {
             let (h, k) = p.stamped(at);
+            let k: Vec<Ring> = k.iter().map(Ring::from_cutout).collect();
+            if let Some(on_face) = &on_face {
+                for ring in h.iter().map(Ring::from_hole).chain(k.iter().cloned()) {
+                    on_face(&ring)?;
+                }
+            }
             holes.extend(h);
-            cutouts.extend(k.iter().map(Ring::from_cutout));
+            cutouts.extend(k);
             punches.push(FlatPunch {
                 id: p.id.clone(),
                 center: at,
@@ -2445,73 +2516,24 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         }
     }
     for fc in &spec.face_cuts {
-        let mut on = folds.iter().enumerate().filter(|(_, f)| f.flange == fc.on);
-        let (Some((k, f)), None, true) = (
-            on.next(),
-            on.next(),
-            spec.flanges.iter().any(|g| g.id == fc.on),
-        ) else {
-            return Err(SheetError::Invalid(format!(
-                "face cuts: no flange {}",
-                fc.on
-            )));
-        };
-        let start = f.s0 + f.bend_allowance;
-        let setback = (f.radius + spec.thickness) * (f.angle / 2.0).tan();
-        let next = folds
-            .iter()
-            .filter(|g| g.parent == Some(k))
-            .map(|g| g.s0)
-            .fold(f64::INFINITY, f64::min);
-        let map = |p: P2| {
-            add(
-                f.edge_point,
-                add(scale(f.u, p[0]), scale(f.n, start + p[1] - setback)),
-            )
-        };
-        // Flat distances from the edge: lowest and highest.
-        let on_face = |(lo, hi): (f64, f64)| {
-            if lo < start - EPS || hi > next + EPS {
-                return Err(SheetError::Unsupported(format!(
-                    "face cuts on {}: reaching into a bend",
-                    fc.on
-                )));
-            }
-            Ok(())
-        };
-        for h in &fc.holes {
-            let center = map(h.center);
-            let s = dot(sub(center, f.edge_point), f.n);
-            let r = h.diameter / 2.0;
-            on_face((s - r, s + r))?;
-            holes.push(Hole {
-                center,
-                diameter: h.diameter,
-            });
+        let (frame, on_face) = face(&fc.on, "face cuts")?;
+        // The cuts as one stamp at the frame's origin.
+        let placed = Punch {
+            id: String::new(),
+            on: None,
+            at: vec![[0.0, 0.0]],
+            angle: 0.0,
+            holes: fc.holes.clone(),
+            cutouts: fc.cutouts.clone(),
         }
-        for c in &fc.cutouts {
-            // The face frame is mirrored against the flat: arcs turn the
-            // other way, and the ring runs back to counter-clockwise.
-            let ring = Ring::from_cutout(c);
-            let mapped = Ring {
-                points: ring.points.iter().map(|&p| map(p)).collect(),
-                arcs: ring
-                    .arcs
-                    .iter()
-                    .map(|a| {
-                        a.and_then(Curve::arc).map(|a| {
-                            Curve::Arc(Arc {
-                                center: map(a.center),
-                                ccw: !a.ccw,
-                            })
-                        })
-                    })
-                    .collect(),
-            }
-            .reversed();
-            on_face(extent_along(&mapped, f.n, f.edge_point))?;
-            cutouts.push(mapped);
+        .placed(&frame);
+        let (h, k) = placed.stamped(placed.at[0]);
+        let k: Vec<Ring> = k.iter().map(Ring::from_cutout).collect();
+        for ring in h.iter().map(Ring::from_hole).chain(k.iter().cloned()) {
+            on_face(&ring)?;
         }
+        holes.extend(h);
+        cutouts.extend(k);
     }
 
     let mut layout = Layout {
@@ -2594,7 +2616,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     }
     for e in &layout.embosses {
         let held = layout.cells.iter().any(|c| {
-            c.zone == Zone::Base
+            !matches!(c.zone, Zone::Bend(_))
                 && match e.hole() {
                     Some(h) => c.holes.contains(&h),
                     None => c
@@ -2605,7 +2627,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         });
         if !held {
             return Err(SheetError::Unsupported(format!(
-                "emboss {}: only on the base plate, clear of bends and cut-outs",
+                "emboss {}: only on one flat plate, clear of bends and cut-outs",
                 e.id
             )));
         }
@@ -3373,6 +3395,68 @@ mod tests {
             SheetError::Unsupported("face cuts on f2: reaching into a bend".into())
         );
         layout(&part(7.5)).unwrap();
+    }
+
+    #[test]
+    fn a_punch_on_a_flange_stamps_as_its_face_cuts() {
+        // An L-shaped cut-out and a hole, turned 90 degrees in the face's
+        // [along, up], at two points: the same as face cuts stamped by hand.
+        let punch = crate::spec::Punch {
+            id: "L".into(),
+            on: Some("f2".into()),
+            at: vec![[30.0, 15.0], [60.0, 20.0]],
+            angle: 90.0,
+            holes: vec![Hole {
+                center: [4.0, 4.0],
+                diameter: 2.0,
+            }],
+            cutouts: vec![crate::spec::Cutout {
+                outline: vec![
+                    [-3.0, -3.0],
+                    [5.0, -3.0],
+                    [5.0, 0.0],
+                    [0.0, 0.0],
+                    [0.0, 3.0],
+                    [-3.0, 3.0],
+                ],
+                bulges: vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            }],
+        };
+        let mut punched = plate(vec![flange(2)]);
+        punched.base.holes.clear();
+        punched.base.punches = vec![punch.clone()];
+        let mut cut = punched.clone();
+        cut.base.punches.clear();
+        for &at in &punch.at {
+            let (holes, cutouts) = punch.stamped(at);
+            cut.face_cuts.push(crate::spec::FaceCuts {
+                on: "f2".into(),
+                holes,
+                cutouts,
+            });
+        }
+        let (a, b) = (layout(&punched).unwrap().flat, layout(&cut).unwrap().flat);
+        assert_eq!(a.holes.len(), 2);
+        for (h, k) in a.holes.iter().zip(&b.holes) {
+            assert!(dist(h.center, k.center) < 1e-9 && h.diameter == k.diameter);
+        }
+        assert_eq!(a.cutouts.len(), 2);
+        for (p, q) in a.cutouts.iter().zip(&b.cutouts) {
+            assert!(p.area() > 0.0 && (p.area() - q.area()).abs() < 1e-9);
+            assert!(p.points.iter().all(|&x| has(&q.points, x)));
+        }
+        // The stamps: at their flat centres, and the flange's mirrored frame
+        // (along -x, up +y) turns them the other way from its along.
+        assert_eq!(a.punches.len(), 2);
+        let s = 60.0 + std::f64::consts::FRAC_PI_2 * 2.8 - 2.0 - 4.0;
+        assert!(dist(a.punches[0].center, [70.0, s + 15.0]) < 1e-9);
+        assert!((a.punches[0].angle - 90.0).abs() < 1e-9);
+        // Past the face into the bend: refused.
+        punched.base.punches[0].at[0] = [30.0, 6.0];
+        assert_eq!(
+            layout(&punched).unwrap_err(),
+            SheetError::Unsupported("punch L on f2: reaching into a bend".into())
+        );
     }
 
     #[test]

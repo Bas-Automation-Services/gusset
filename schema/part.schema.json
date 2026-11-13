@@ -155,7 +155,7 @@
           }
         },
         "embosses": {
-          "description": "Formed embosses on the base plate.",
+          "description": "Formed embosses, on the base or any other flat plate.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Emboss"
@@ -689,17 +689,17 @@
       ]
     },
     "Emboss": {
-      "description": "An emboss: the sheet pressed out of the base plate at its thickness,\naround a centre in the flat pattern. Seen from the side it rises out of\nthe plate through a rounded corner, along a straight wall, and over a\nsecond rounded corner into its raised face, `height` above the plate's\nface on that side. Both corners have `radius` on their inside. The flat\npattern keeps the plate whole (the emboss stretches it) and marks the\nfootprint, where the sheet leaves the plate.",
+      "description": "An emboss: the sheet pressed out of a flat plate at its thickness,\naround a centre. Seen from the side it rises out of the plate through a\nrounded corner, along a straight wall, and over a second rounded corner\ninto its raised face, `height` above the plate's face on that side. Both\ncorners have `radius` on their inside. The flat pattern keeps the plate\nwhole (the emboss stretches it) and marks the footprint, where the sheet\nleaves the plate. The footprint must lie on one plate, clear of bends.",
       "type": "object",
       "properties": {
         "angle": {
-          "description": "A rectangle's turn, counter-clockwise, degrees.",
+          "description": "A rectangle's turn, counter-clockwise from the frame's x, degrees.",
           "type": "number",
           "format": "double",
           "default": 0.0
         },
         "at": {
-          "description": "The centre, in the flat pattern.",
+          "description": "The centre.",
           "type": "array",
           "items": {
             "type": "number",
@@ -721,6 +721,13 @@
         "id": {
           "type": "string"
         },
+        "on": {
+          "description": "The flange or face whose frame `at`, `angle` and `side` are in, as\nfor a punch; the flat pattern's when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "radius": {
           "description": "Inside radius of both corners. Default: the part's bend radius.",
           "type": [
@@ -733,7 +740,7 @@
           "$ref": "#/$defs/EmbossShape"
         },
         "side": {
-          "description": "`up`: out of the plate's top face (+z); `down`: out of its bottom.",
+          "description": "`up`: towards the frame's normal (x cross y: +z in the flat\npattern), `down`: away from it.",
           "$ref": "#/$defs/Side"
         }
       },
@@ -1388,7 +1395,7 @@
       ]
     },
     "Punch": {
-      "description": "A punch: holes and cut-outs drawn around (0, 0), stamped in the flat\npattern at each point and turned counter-clockwise by `angle` degrees. The\nflat pattern lists every stamp (id, centre, angle) for the punch press.",
+      "description": "A punch: holes and cut-outs drawn around (0, 0), stamped at each point\nand turned counter-clockwise by `angle` degrees. The flat pattern lists\nevery stamp (id, centre, angle) for the punch press.",
       "type": "object",
       "properties": {
         "angle": {
@@ -1397,7 +1404,7 @@
           "default": 0.0
         },
         "at": {
-          "description": "The stamps' centres in the flat pattern.",
+          "description": "The stamps' centres.",
           "type": "array",
           "items": {
             "type": "array",
@@ -1424,6 +1431,13 @@
         "id": {
           "description": "The punch's ID, as the flat pattern marks it.",
           "type": "string"
+        },
+        "on": {
+          "description": "The flange or face whose frame the stamps are in. On a flange (or a\nflange on its tip): [along, up] as for face cuts, its normal along\ncross up; the stamps stay on its flat, clear of its bends. On a face:\nthe face's x, y, its normal x cross y. The flat pattern's frame when\nabsent.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

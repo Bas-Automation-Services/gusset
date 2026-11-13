@@ -38,11 +38,13 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
 - **Holes and cut-outs** anywhere in the flat, across bends, and across the outline as
   notches, also through a mitered bend's curved end; or placed on a flange's face, measured
   along its edge and up from the mold line.
-- **Punches:** a shape of holes and cut-outs stamped at several points, turned by an angle;
-  the flat pattern marks each stamp's centre and punch ID.
-- **Embosses:** round or rectangular embosses (dimples, ribs, pads) pressed out of the base
-  plate, up or down, at the sheet's thickness: a drafted or straight wall between two rounded
-  corners, exact (tori, cones, cylinders); the flat pattern marks the footprint.
+- **Punches:** a shape of holes and cut-outs stamped at several points, turned by an angle,
+  in the flat or on a flange's or face's own face; the flat pattern marks each stamp's centre
+  and punch ID.
+- **Embosses:** round or rectangular embosses (dimples, ribs, pads) pressed out of any flat
+  plate (the base, a flange, a face), either way, at the sheet's thickness: a drafted or
+  straight wall between two rounded corners, exact (tori, cones, cylinders); the flat pattern
+  marks the footprint.
 - **Bend order:** every bend numbered in the order it's made (outermost first, or as you
   list them), with a note at each bend line in the flat DXF and SVG.
 - **Unfolding** by K-factor (per part or per feature) or by a bend table (DIN 6935 style: bend deduction by radius and angle).

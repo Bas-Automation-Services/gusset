@@ -86,7 +86,7 @@ pub fn mass(brep: &BrepEnvelope, deflection: f64) -> Result<Mass, SheetError> {
 
 /// Rigid map p -> r p + t (r row-major).
 #[derive(Clone, Copy)]
-struct Rigid {
+pub(crate) struct Rigid {
     r: [[f64; 3]; 3],
     t: P3,
 }
@@ -96,10 +96,10 @@ impl Rigid {
         r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         t: [0.0; 3],
     };
-    fn rot(&self, v: P3) -> P3 {
+    pub(crate) fn rot(&self, v: P3) -> P3 {
         std::array::from_fn(|i| dot(self.r[i], v))
     }
-    fn apply(&self, p: P3) -> P3 {
+    pub(crate) fn apply(&self, p: P3) -> P3 {
         add(self.rot(p), self.t)
     }
     /// self after other: p -> self(other(p)).
@@ -287,6 +287,19 @@ impl<'a> Model<'a> {
                 ]
             }
         }
+    }
+
+    /// The map of the flat plate an emboss is on.
+    fn emboss_rigid(&self, e: &crate::emboss::Formed) -> Rigid {
+        let on = |c: &&crate::flat::Cell| match e.hole() {
+            Some(h) => c.holes.contains(&h),
+            None => c
+                .inner
+                .iter()
+                .any(|r| r.points.contains(&e.ring().points[0])),
+        };
+        let cell = self.layout.cells.iter().find(on);
+        self.rigid(cell.map_or(Zone::Base, |c| c.zone))
     }
 
     /// The rotation part of a flat zone's map.
@@ -992,7 +1005,8 @@ impl<'a> Model<'a> {
         // Hole walls: UV = (circle parameter, height), seam at parameter 0.
         for (k, h) in holes.iter().enumerate() {
             if let Some(e) = h.formed {
-                self.layout.embosses[e].build_round(&mut b, h.circles, h.v)?;
+                let e = &self.layout.embosses[e];
+                e.build_round(&mut b, self.emboss_rigid(e), h.circles, h.v)?;
                 continue;
             }
             let face = b.face(
@@ -1042,7 +1056,8 @@ impl<'a> Model<'a> {
                     (e.id, e.start)
                 })
             });
-            self.layout.embosses[*i].build_rect(&mut b, vertices, rings)?;
+            let e = &self.layout.embosses[*i];
+            e.build_rect(&mut b, self.emboss_rigid(e), vertices, rings)?;
         }
         Ok(b.finish_solid()?)
     }
@@ -1734,13 +1749,14 @@ impl Model<'_> {
                 }
             }
         }
-        // The embosses (all on the base, which stays in place).
+        // The embosses, moved with their plates.
         for e in &self.layout.embosses {
             let m = e.mass();
             volume += m.volume;
             area += m.area;
+            let c = self.emboss_rigid(e).apply(m.center_of_mass);
             for j in 0..3 {
-                moment[j] += m.volume * m.center_of_mass[j];
+                moment[j] += m.volume * c[j];
             }
         }
         Mass {

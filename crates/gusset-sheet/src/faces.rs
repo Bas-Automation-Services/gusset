@@ -8,8 +8,8 @@
 use crate::cut::{cut, Clip};
 use crate::flat::{Arc, Cell, Curve, Ring, Zone, P2};
 use crate::spec::{
-    Bend, BendLocation, Cutout, DoubleBend, EdgeRef, Face, FaceEdge, FixedEdge, FoldLine, Hole,
-    PartSpec, Relief, ReliefShape, Side,
+    Bend, BendLocation, Cutout, DoubleBend, EdgeRef, Face, FaceEdge, FixedEdge, FoldLine, Frame2,
+    Hole, PartSpec, Relief, ReliefShape, Side,
 };
 use crate::SheetError;
 
@@ -202,6 +202,25 @@ pub(crate) fn without_faces(spec: &PartSpec) -> Result<PartSpec, SheetError> {
         for c in &f.cutouts {
             let (outline, bulges) = to_bulges(&f.map.ring(&Ring::from_cutout(c)));
             part.base.cutouts.push(Cutout { outline, bulges });
+        }
+    }
+    // Punches and embosses on a face: into the flat (on a flange, later).
+    let frame = |on: &Option<String>| {
+        let f = placed.iter().find(|f| Some(&f.id) == on.as_ref())?;
+        Some(Frame2 {
+            o: f.map.apply([0.0, 0.0]),
+            x: f.map.linear([1.0, 0.0]),
+            y: f.map.linear([0.0, 1.0]),
+        })
+    };
+    for p in &mut part.base.punches {
+        if let Some(fr) = frame(&p.on) {
+            *p = p.placed(&fr);
+        }
+    }
+    for e in &mut part.base.embosses {
+        if let Some(fr) = frame(&e.on) {
+            *e = e.placed(&fr);
         }
     }
     part.faces = Vec::new();
@@ -1483,6 +1502,119 @@ mod tests {
             let flat = crate::flat::flat_pattern(&faces).unwrap();
             assert!((flat.area() - other.area()).abs() < 1e-8);
             crate::fold::fold(&faces).unwrap();
+        }
+    }
+
+    #[test]
+    fn punches_and_embosses_on_a_face_land_as_on_a_flange() {
+        // The wall of the test above: face b (x along +x, y up; its normal
+        // -y, into the part) and flange w ([along, up] = [100 - x, y]; its
+        // normal +y). The same punch and emboss on each: on w mirrored in x,
+        // turned the other way, the other side up.
+        let shape = |m: f64| {
+            let p = |x: f64, y: f64| format!("[{}, {y}]", m * x);
+            let mut pts = [p(-4.0, -3.0), p(5.0, -3.0), p(5.0, 0.0), p(0.0, 4.0)];
+            if m < 0.0 {
+                pts.reverse();
+            }
+            format!(
+                r#""holes": [{{ "center": [{}, 3], "diameter": 2 }}], "cutouts": [{{ "outline": [{}] }}]"#,
+                m * -3.0,
+                pts.join(", ")
+            )
+        };
+        // x on b, along on w.
+        let x = |m: f64, x: f64| if m < 0.0 { 100.0 - x } else { x };
+        let punch = |on: &str, m: f64, angle: f64| {
+            format!(
+                r#"{{ "id": "P", "on": "{on}", "at": [[50, 30], [{}, 25]], "angle": {angle}, {} }}"#,
+                x(m, 20.0),
+                shape(m)
+            )
+        };
+        let emboss = |on: &str, m: f64, side: &str, angle: f64| {
+            format!(
+                r#"{{ "id": "E", "on": "{on}", "at": [{}, 29], "height": 8, "draft": 15, "side": "{side}",
+                     "angle": {angle}, "shape": {{ "rectangle": {{ "width": 24, "length": 18, "corner_radius": 8 }} }} }}"#,
+                x(m, 75.0)
+            )
+        };
+        let base = |depth: f64, on: &str, m: f64, angle: f64, side: &str| {
+            format!(
+                r#""outline": [[0, 0], [100, 0], [100, {depth}], [0, {depth}]],
+                   "punches": [{}], "embosses": [{}]"#,
+                punch(on, m, angle),
+                emboss(on, m, side, angle)
+            )
+        };
+        let flanged: PartSpec = serde_json::from_str(&format!(
+            r#"{{ "id": "f", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                 "base": {{ {} }},
+                 "flanges": [{{ "id": "w", "on": {{ "base": 2 }}, "angle": 90, "length": 50,
+                                "datum": "outer", "position": "outside", "side": "up" }}] }}"#,
+            base(68.0, "w", -1.0, -30.0, "down")
+        ))
+        .unwrap();
+        let mut faced = part(60.0, &wall(70.0, WALL, "up"), 0, "");
+        faced.base =
+            serde_json::from_str(&format!("{{ {} }}", base(60.0, "b", 1.0, 30.0, "up"))).unwrap();
+        // The punch as the face's own holes and cut-outs, stamped by hand.
+        let mut by_hand = faced.clone();
+        by_hand.base.punches.clear();
+        let p: crate::spec::Punch = serde_json::from_str(&punch("b", 1.0, 30.0)).unwrap();
+        for &at in &p.at {
+            let (h, k) = p.stamped(at);
+            by_hand.faces[0].holes.extend(h);
+            by_hand.faces[0].cutouts.extend(k);
+        }
+
+        let key = |p: crate::flat::P2| ((p[0] * 1e6).round() as i64, (p[1] * 1e6).round() as i64);
+        let cuts = |spec: &PartSpec| {
+            let f = crate::flat::flat_pattern(spec).unwrap();
+            let mut holes: Vec<_> = f.holes.iter().map(|h| key(h.center)).collect();
+            let mut rings: Vec<_> = f
+                .cutouts
+                .iter()
+                .map(|r| {
+                    let mut k: Vec<_> = r.points.iter().map(|&p| key(p)).collect();
+                    k.sort();
+                    (k, (r.area() * 1e6).round() as i64)
+                })
+                .collect();
+            holes.sort();
+            rings.sort();
+            (holes, rings, f.forms.len())
+        };
+        let faced_cuts = cuts(&faced);
+        assert_eq!(faced_cuts.0.len(), 2);
+        assert!(faced_cuts.1.iter().all(|r| r.1 > 0));
+        assert_eq!(faced_cuts.0, cuts(&by_hand).0);
+        assert_eq!(faced_cuts.1, cuts(&by_hand).1);
+        assert_eq!(faced_cuts, cuts(&flanged));
+
+        let (a, b) = (
+            crate::fold::exact_mass(&faced).unwrap(),
+            crate::fold::exact_mass(&flanged).unwrap(),
+        );
+        assert!(
+            (a.volume - b.volume).abs() < 1e-8,
+            "{} {}",
+            a.volume,
+            b.volume
+        );
+        assert!((a.area - b.area).abs() < 1e-8, "{} {}", a.area, b.area);
+        for i in 0..3 {
+            assert!(
+                (a.center_of_mass[i] - b.center_of_mass[i]).abs() < 1e-9,
+                "{:?} {:?}",
+                a.center_of_mass,
+                b.center_of_mass
+            );
+        }
+        for spec in [&faced, &flanged] {
+            let solid = crate::fold::fold(spec).unwrap();
+            let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+            assert!((mesh.volume - a.volume).abs() / a.volume < 2e-5);
         }
     }
 

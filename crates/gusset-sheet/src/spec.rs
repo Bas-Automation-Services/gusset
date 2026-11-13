@@ -576,23 +576,27 @@ pub struct Base {
     /// Punched shapes, stamped in the flat pattern like holes and cut-outs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub punches: Vec<Punch>,
-    /// Formed embosses on the base plate.
+    /// Formed embosses, on the base or any other flat plate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub embosses: Vec<Emboss>,
 }
 
-/// An emboss: the sheet pressed out of the base plate at its thickness,
-/// around a centre in the flat pattern. Seen from the side it rises out of
-/// the plate through a rounded corner, along a straight wall, and over a
-/// second rounded corner into its raised face, `height` above the plate's
-/// face on that side. Both corners have `radius` on their inside. The flat
-/// pattern keeps the plate whole (the emboss stretches it) and marks the
-/// footprint, where the sheet leaves the plate.
+/// An emboss: the sheet pressed out of a flat plate at its thickness,
+/// around a centre. Seen from the side it rises out of the plate through a
+/// rounded corner, along a straight wall, and over a second rounded corner
+/// into its raised face, `height` above the plate's face on that side. Both
+/// corners have `radius` on their inside. The flat pattern keeps the plate
+/// whole (the emboss stretches it) and marks the footprint, where the sheet
+/// leaves the plate. The footprint must lie on one plate, clear of bends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Emboss {
     pub id: String,
-    /// The centre, in the flat pattern.
+    /// The flange or face whose frame `at`, `angle` and `side` are in, as
+    /// for a punch; the flat pattern's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// The centre.
     pub at: [f64; 2],
     pub shape: EmbossShape,
     pub height: f64,
@@ -603,11 +607,31 @@ pub struct Emboss {
     /// Inside radius of both corners. Default: the part's bend radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f64>,
-    /// `up`: out of the plate's top face (+z); `down`: out of its bottom.
+    /// `up`: towards the frame's normal (x cross y: +z in the flat
+    /// pattern), `down`: away from it.
     pub side: Side,
-    /// A rectangle's turn, counter-clockwise, degrees.
+    /// A rectangle's turn, counter-clockwise from the frame's x, degrees.
     #[serde(default)]
     pub angle: f64,
+}
+
+impl Emboss {
+    /// The emboss in the flat pattern's frame, placed in `frame`. A mirrored
+    /// frame turns it the other way and its normal over (the shape is
+    /// symmetric).
+    pub(crate) fn placed(&self, frame: &Frame2) -> Emboss {
+        let mut e = self.clone();
+        e.on = None;
+        e.at = frame.apply(self.at);
+        e.angle = frame.angle(self.angle);
+        if frame.mirrored() {
+            e.side = match self.side {
+                Side::Up => Side::Down,
+                Side::Down => Side::Up,
+            };
+        }
+        e
+    }
 }
 
 /// An emboss's raised face, measured where the wall meets it (its mold
@@ -628,15 +652,22 @@ pub enum EmbossShape {
     },
 }
 
-/// A punch: holes and cut-outs drawn around (0, 0), stamped in the flat
-/// pattern at each point and turned counter-clockwise by `angle` degrees. The
-/// flat pattern lists every stamp (id, centre, angle) for the punch press.
+/// A punch: holes and cut-outs drawn around (0, 0), stamped at each point
+/// and turned counter-clockwise by `angle` degrees. The flat pattern lists
+/// every stamp (id, centre, angle) for the punch press.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Punch {
     /// The punch's ID, as the flat pattern marks it.
     pub id: String,
-    /// The stamps' centres in the flat pattern.
+    /// The flange or face whose frame the stamps are in. On a flange (or a
+    /// flange on its tip): [along, up] as for face cuts, its normal along
+    /// cross up; the stamps stay on its flat, clear of its bends. On a face:
+    /// the face's x, y, its normal x cross y. The flat pattern's frame when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// The stamps' centres.
     pub at: Vec<[f64; 2]>,
     #[serde(default)]
     pub angle: f64,
@@ -646,7 +677,78 @@ pub struct Punch {
     pub cutouts: Vec<Cutout>,
 }
 
+/// Where a frame's origin and unit axes land in the flat pattern; whether
+/// it is mirrored there, and the angle of its x.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Frame2 {
+    pub o: [f64; 2],
+    pub x: [f64; 2],
+    pub y: [f64; 2],
+}
+
+impl Frame2 {
+    pub fn apply(&self, p: [f64; 2]) -> [f64; 2] {
+        [
+            self.o[0] + p[0] * self.x[0] + p[1] * self.y[0],
+            self.o[1] + p[0] * self.x[1] + p[1] * self.y[1],
+        ]
+    }
+
+    pub fn mirrored(&self) -> bool {
+        self.x[0] * self.y[1] - self.x[1] * self.y[0] < 0.0
+    }
+
+    /// The flat angle of a turn by `angle` degrees in the frame: of x, plus
+    /// the turn, or less it where the frame is mirrored.
+    fn angle(&self, angle: f64) -> f64 {
+        let theta = self.x[1].atan2(self.x[0]).to_degrees();
+        if self.mirrored() {
+            theta - angle
+        } else {
+            theta + angle
+        }
+    }
+}
+
+impl Cutout {
+    /// Mirrored in y = 0, counter-clockwise again.
+    fn mirrored(&self) -> Cutout {
+        let n = self.outline.len();
+        Cutout {
+            outline: (0..n)
+                .rev()
+                .map(|k| [self.outline[k][0], -self.outline[k][1]])
+                .collect(),
+            // Segment j runs back along segment n - 2 - j: the arc turns the
+            // same way (mirrored and reversed).
+            bulges: if self.bulges.is_empty() {
+                Vec::new()
+            } else {
+                (0..n)
+                    .map(|j| self.bulges.get((2 * n - 2 - j) % n).copied().unwrap_or(0.0))
+                    .collect()
+            },
+        }
+    }
+}
+
 impl Punch {
+    /// The punch in the flat pattern's frame, its stamps in `frame`. A
+    /// mirrored frame mirrors its shape.
+    pub(crate) fn placed(&self, frame: &Frame2) -> Punch {
+        let mut p = self.clone();
+        p.on = None;
+        p.at = self.at.iter().map(|&a| frame.apply(a)).collect();
+        p.angle = frame.angle(self.angle);
+        if frame.mirrored() {
+            for h in &mut p.holes {
+                h.center[1] = -h.center[1];
+            }
+            p.cutouts = self.cutouts.iter().map(Cutout::mirrored).collect();
+        }
+        p
+    }
+
     /// Its holes and cut-outs at one stamp's centre.
     pub fn stamped(&self, at: [f64; 2]) -> (Vec<Hole>, Vec<Cutout>) {
         let (s, c) = self.angle.to_radians().sin_cos();
