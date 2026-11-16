@@ -2679,24 +2679,10 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         .into_iter()
         .partition(|h| crate::cut::crosses_outline(&layout.flat, h));
     layout.flat.holes = inside.clone();
-    let notches = across.iter().map(|h| {
-        let (c, r) = (h.center, h.diameter / 2.0);
-        let arc = Some(Curve::Arc(Arc {
-            center: c,
-            ccw: true,
-        }));
-        // Two half circles, from an odd angle: a hole centred on an edge
-        // would otherwise have its vertices on that edge.
-        let (sin, cos) = 1f64.sin_cos();
-        Ring {
-            points: vec![
-                [c[0] + r * cos, c[1] + r * sin],
-                [c[0] - r * cos, c[1] - r * sin],
-            ],
-            arcs: vec![arc, arc],
-        }
-    });
-    layout.flat.cutouts.extend(notches);
+    layout
+        .flat
+        .cutouts
+        .extend(across.iter().map(crate::cut::notch));
     // An emboss's footprint goes into the cells (round ones as holes): the
     // formed sheet starts at its edge.
     let discs: Vec<Hole> = layout.embosses.iter().filter_map(|e| e.hole()).collect();
@@ -3014,6 +3000,62 @@ mod tests {
         let centre = 60.0 - 2.0 + 0.5 * std::f64::consts::FRAC_PI_2 * 2.8;
         assert!((flat.bends[0].line[0][1] - centre).abs() < 1e-9);
         assert!(flat.bends[0].up);
+    }
+
+    /// Notches across a bulged edge: a hole and a cut-out take their part of
+    /// the plate, the edge's arc on either side of each.
+    #[test]
+    fn notches_cross_an_arc_edge() {
+        let mut part = plate(Vec::new());
+        part.base.holes.clear();
+        part.base.bulges = vec![0.3, 0.0, 0.0, 0.0];
+        let plain = crate::fold::exact_mass(&part).unwrap();
+        let area = |f: &FlatPattern| path_area(&f.outline, &f.outline_arcs);
+        let whole = area(&flat_pattern(&part).unwrap());
+        part.base.holes = vec![Hole {
+            center: [50.0, -14.0],
+            diameter: 10.0,
+        }];
+        part.base.cutouts = vec![crate::spec::Cutout {
+            outline: vec![[20.0, -15.0], [30.0, -15.0], [30.0, -5.0], [20.0, -5.0]],
+            bulges: Vec::new(),
+        }];
+        let f = flat_pattern(&part).unwrap();
+        assert!(f.holes.is_empty() && f.cutouts.is_empty());
+        // The round notch is one arc; the edge's arc is cut in three.
+        assert_eq!(f.outline.len(), 4 + 2 + 4);
+        let taken = whole - area(&f);
+        let mass = crate::fold::exact_mass(&part).unwrap();
+        assert!((plain.volume - mass.volume - 2.0 * taken).abs() < 1e-9);
+        assert!(taken > 50.0 && taken < 78.6 + 100.0);
+    }
+
+    /// A cut-out crossing itself, or lying in another, is refused.
+    #[test]
+    fn crossed_and_nested_cut_outs_are_refused() {
+        let cutout = |outline: Vec<P2>, bulges: Vec<f64>| crate::spec::Cutout { outline, bulges };
+        let mut part = plate(Vec::new());
+        part.base.cutouts = vec![cutout(
+            vec![[40.0, 20.0], [60.0, 20.0], [60.0, 24.0], [40.0, 24.0]],
+            vec![-0.5, 0.0, 0.0, 0.0],
+        )];
+        let e = flat_pattern(&part).unwrap_err().to_string();
+        assert!(e.contains("crosses itself"), "{e}");
+        part.base.cutouts = vec![
+            cutout(
+                vec![[40.0, 20.0], [70.0, 20.0], [70.0, 40.0], [40.0, 40.0]],
+                Vec::new(),
+            ),
+            cutout(
+                vec![[50.0, 25.0], [60.0, 25.0], [60.0, 35.0], [50.0, 35.0]],
+                Vec::new(),
+            ),
+        ];
+        let e = flat_pattern(&part).unwrap_err().to_string();
+        assert!(e.contains("overlaps another cut-out"), "{e}");
+        part.base.cutouts.reverse();
+        let e = flat_pattern(&part).unwrap_err().to_string();
+        assert!(e.contains("overlaps another cut-out"), "{e}");
     }
 
     #[test]

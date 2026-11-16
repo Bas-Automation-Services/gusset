@@ -35,6 +35,25 @@ pub(crate) fn cut_holes(layout: &mut Layout, holes: &[Hole]) -> Result<(), Sheet
     Ok(())
 }
 
+/// A hole across the outline as a circular cut-out (a round notch): two
+/// half circles from an odd angle, since a hole centred on an edge would
+/// otherwise have its vertices on that edge.
+pub(crate) fn notch(h: &Hole) -> Ring {
+    let (c, r) = (h.center, h.diameter / 2.0);
+    let arc = Some(Curve::Arc(Arc {
+        center: c,
+        ccw: true,
+    }));
+    let (sin, cos) = 1f64.sin_cos();
+    Ring {
+        points: vec![
+            [c[0] + r * cos, c[1] + r * sin],
+            [c[0] - r * cos, c[1] - r * sin],
+        ],
+        arcs: vec![arc, arc],
+    }
+}
+
 /// Whether a hole's circle crosses the flat outline (a round notch).
 pub(crate) fn crosses_outline(flat: &FlatPattern, h: &Hole) -> bool {
     let (pts, arcs) = (&flat.outline, &flat.outline_arcs);
@@ -116,6 +135,46 @@ impl Clip {
                 }
             }),
         }
+    }
+
+    /// Where the outline arc from p to q crosses the boundary (strictly
+    /// between its ends); Err when it only touches it, or passes through a
+    /// corner of it.
+    fn arc_crossings(&self, p: P2, q: P2, a: Arc) -> Result<Vec<P2>, ()> {
+        let (c, r) = (a.center, dist(p, a.center));
+        let mut points = Vec::new();
+        match self {
+            Clip::Disc { c: d, r: rd } => points = circle_circle(c, r, *d, *rd)?,
+            Clip::Profile(ring) => {
+                for k in 0..ring.points.len() {
+                    let (c0, c1) = segment(ring, k);
+                    if (dist(c0, c) - r).abs() <= EPS && on_arc(c0, p, q, a) {
+                        return Err(());
+                    }
+                    match arc(ring.arcs[k]) {
+                        None => match line_circle(c0, c1, c, r) {
+                            Ok(ts) => points.extend(
+                                ts.into_iter()
+                                    .filter(|t| *t > 0.0 && *t < 1.0)
+                                    .map(|t| add(c0, scale(sub(c1, c0), t))),
+                            ),
+                            Err(t) if on_arc(add(c0, scale(sub(c1, c0), t)), p, q, a) => {
+                                return Err(())
+                            }
+                            Err(_) => {}
+                        },
+                        Some(b) => points.extend(
+                            circle_circle(c, r, b.center, dist(c0, b.center))?
+                                .into_iter()
+                                .filter(|&x| on_arc(x, c0, c1, b)),
+                        ),
+                    }
+                }
+            }
+        }
+        points.retain(|&x| on_arc(x, p, q, a));
+        points.sort_by(|x, y| a.sweep(p, *x).abs().total_cmp(&a.sweep(p, *y).abs()));
+        Ok(points)
     }
 
     /// Parameters t in (0, 1) where a -> b crosses the boundary, in order;
@@ -359,8 +418,28 @@ pub(crate) fn cut(
             }
             continue;
         }
-        if cell.arcs[k].is_some() {
-            // Arcs are outline (relief) segments, which cuts keep clear of.
+        if let Some(Curve::Arc(a)) = cell.arcs[k] {
+            // An outline arc: where the clip's boundary crosses it, at its
+            // fraction of the arc's turn.
+            let Ok(points) = clip.arc_crossings(p, q, a) else {
+                return unsupported("its edge touches an edge of the part");
+            };
+            let (c, sweep) = (a.center, a.sweep(p, q));
+            let r = dist(p, c);
+            for point in points {
+                if (on[k] && dist(point, p) <= EPS) || (on[(k + 1) % n] && dist(point, q) <= EPS) {
+                    continue;
+                }
+                let t = a.sweep(p, point) / sweep;
+                let turn = a.sweep(p, point) + 1e-6 / r * sweep.signum();
+                let ahead = add(c, rotate(sub(p, c), turn));
+                crossings.push(Crossing {
+                    segment: k,
+                    t,
+                    p: point,
+                    entering: clip.contains(ahead),
+                });
+            }
             continue;
         }
         // Solve in a canonical direction so neighbouring cells get the very
@@ -519,6 +598,9 @@ pub(crate) fn cut_cutouts(layout: &mut Layout) -> Result<(), SheetError> {
         if n < 2 || ring.arcs.len() != n || ring.area() <= EPS {
             return invalid("needs a counter-clockwise outline");
         }
+        if crosses_itself(ring) {
+            return invalid("crosses itself");
+        }
         let outline = Ring {
             points: flat.outline.clone(),
             arcs: flat.outline_arcs.clone(),
@@ -533,12 +615,16 @@ pub(crate) fn cut_cutouts(layout: &mut Layout) -> Result<(), SheetError> {
                 c: h.center,
                 r: h.diameter / 2.0,
             };
-            if touches(&disc, ring) || clips[k].contains(h.center) {
+            if touches(&disc, ring) || clips[k].contains(h.center) || disc.contains(ring.points[0])
+            {
                 return invalid("overlaps a hole");
             }
         }
-        for other in &rings[..k] {
-            if touches(&clips[k], other) || clips[k].contains(other.points[0]) {
+        for (other, clip) in rings[..k].iter().zip(&clips) {
+            if touches(&clips[k], other)
+                || clips[k].contains(other.points[0])
+                || clip.contains(ring.points[0])
+            {
                 return invalid("overlaps another cut-out");
             }
         }
@@ -708,7 +794,8 @@ fn cut_across(
             "{what}: it splits the part"
         )));
     }
-    let piece = pieces.remove(0);
+    let mut piece = pieces.remove(0);
+    merge_arcs(&mut piece.polygon, &mut piece.arcs);
     layout.flat.outline = piece.polygon;
     layout.flat.outline_arcs = piece.arcs;
     // Bend lines end where the relief cuts them.
@@ -833,6 +920,131 @@ pub(crate) fn inside(p: P2, pts: &[P2], arcs: &[Option<Curve>]) -> bool {
 }
 
 /// Whether point x (on the arc's circle) lies on the arc from a to b.
+/// Drops the vertices between two arcs of one circle running the same way
+/// (a round notch's halves): one arc on.
+fn merge_arcs(points: &mut Vec<P2>, arcs: &mut Vec<Option<Curve>>) {
+    let mut k = 0;
+    while k < points.len() && points.len() > 3 {
+        let before = (k + points.len() - 1) % points.len();
+        let same = match (arc(arcs[before]), arc(arcs[k])) {
+            (Some(a), Some(b)) => {
+                a.ccw == b.ccw
+                    && dist(a.center, b.center) <= EPS
+                    && (dist(points[k], a.center) - dist(points[before], a.center)).abs() <= EPS
+            }
+            _ => false,
+        };
+        if same {
+            points.remove(k);
+            arcs.remove(k);
+        } else {
+            k += 1;
+        }
+    }
+}
+
+/// Whether a ring's segments meet anywhere but at the corners neighbours
+/// share.
+fn crosses_itself(ring: &Ring) -> bool {
+    let n = ring.points.len();
+    (0..n).any(|i| {
+        (i + 1..n).any(|j| {
+            let mut shared = Vec::new();
+            if j == i + 1 {
+                shared.push(ring.points[j]);
+            }
+            if i == 0 && j == n - 1 {
+                shared.push(ring.points[0]);
+            }
+            meet(ring, i, j)
+                .iter()
+                .any(|x| shared.iter().all(|s| dist(*x, *s) > EPS))
+        })
+    })
+}
+
+/// Where segments i and j of a ring meet (a touch of two circles anywhere
+/// counts as their meeting point).
+fn meet(ring: &Ring, i: usize, j: usize) -> Vec<P2> {
+    let ((a0, a1), (b0, b1)) = (segment(ring, i), segment(ring, j));
+    let on_line = |x: P2, p: P2, q: P2| segment_distance(x, p, q) <= EPS;
+    let on_curve = |x: P2, p: P2, q: P2, c: Option<Arc>| match c {
+        None => on_line(x, p, q),
+        Some(c) => {
+            dist(x, p) <= EPS
+                || dist(x, q) <= EPS
+                || (on_arc(x, p, q, c) && (dist(x, c.center) - dist(p, c.center)).abs() <= EPS)
+        }
+    };
+    let (ca, cb) = (arc(ring.arcs[i]), arc(ring.arcs[j]));
+    let candidates = match (ca, cb) {
+        (None, None) => {
+            let (d, e) = (sub(a1, a0), sub(b1, b0));
+            let den = cross(d, e);
+            if den.abs() <= EPS * dot(d, d).sqrt() * dot(e, e).sqrt() {
+                // Parallel: they meet where an end lies on the other.
+                [a0, a1, b0, b1].to_vec()
+            } else {
+                let w = sub(b0, a0);
+                vec![add(a0, scale(d, cross(w, e) / den))]
+            }
+        }
+        (None, Some(c)) | (Some(c), None) => {
+            let (p, q, o) = if ca.is_none() {
+                (a0, a1, (b0, b1))
+            } else {
+                (b0, b1, (a0, a1))
+            };
+            let ts = match line_circle(p, q, c.center, dist(o.0, c.center)) {
+                Ok(ts) => ts,
+                Err(t) => vec![t],
+            };
+            ts.into_iter()
+                .map(|t| add(p, scale(sub(q, p), t)))
+                .collect()
+        }
+        (Some(c), Some(e)) => {
+            match circle_circle(c.center, dist(a0, c.center), e.center, dist(b0, e.center)) {
+                Ok(points) => points,
+                Err(()) => [a0, a1, b0, b1].to_vec(),
+            }
+        }
+    };
+    candidates
+        .into_iter()
+        .filter(|&x| on_curve(x, a0, a1, ca) && on_curve(x, b0, b1, cb))
+        .collect()
+}
+
+/// Where two circles cross; Err where they touch or coincide.
+fn circle_circle(c0: P2, r0: f64, c1: P2, r1: f64) -> Result<Vec<P2>, ()> {
+    let d = dist(c0, c1);
+    if d <= EPS {
+        return if (r0 - r1).abs() <= EPS {
+            Err(())
+        } else {
+            Ok(Vec::new())
+        };
+    }
+    if (d - (r0 + r1)).abs() <= EPS || (d - (r0 - r1).abs()).abs() <= EPS {
+        return Err(());
+    }
+    if d > r0 + r1 || d < (r0 - r1).abs() {
+        return Ok(Vec::new());
+    }
+    let along = (r0 * r0 - r1 * r1 + d * d) / (2.0 * d);
+    let h = (r0 * r0 - along * along).max(0.0).sqrt();
+    let u = scale(sub(c1, c0), 1.0 / d);
+    let m = add(c0, scale(u, along));
+    let w = [-u[1], u[0]];
+    Ok(vec![add(m, scale(w, h)), sub(m, scale(w, h))])
+}
+
+fn rotate(v: P2, angle: f64) -> P2 {
+    let (s, c) = angle.sin_cos();
+    [c * v[0] - s * v[1], s * v[0] + c * v[1]]
+}
+
 fn on_arc(x: P2, a: P2, b: P2, arc: Arc) -> bool {
     let sweep = arc.sweep(a, b);
     let part = arc.sweep(a, x);
