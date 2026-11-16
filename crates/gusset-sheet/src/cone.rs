@@ -20,6 +20,10 @@ use std::f64::consts::{PI, TAU};
 
 const EPS: f64 = 1e-9;
 
+/// A piece of a cut's edge: its edge on each face, its vertices at either
+/// end, and its flat points there.
+type Piece3 = ([u32; 2], [u32; 2], [u32; 2], P2, P2);
+
 /// The sheet's rectangle in the meridian half-plane.
 struct Section {
     sweep: f64,
@@ -202,12 +206,11 @@ impl Section {
                 });
             }
         }
-        if holes.iter().any(|h| crate::cut::crosses_outline(&f, h)) {
-            return Err(SheetError::Unsupported(
-                "a hole across a cone's edge".into(),
-            ));
-        }
-        let n = cutouts.len();
+        // A hole across the sheet's edge is a round notch.
+        let (across, holes): (Vec<_>, Vec<_>) = holes
+            .into_iter()
+            .partition(|h| crate::cut::crosses_outline(&f, h));
+        cutouts.extend(across.iter().map(crate::cut::notch));
         f.holes = holes.clone();
         f.cutouts = cutouts;
         let mut layout = Layout {
@@ -226,53 +229,6 @@ impl Section {
         };
         crate::cut::cut_holes(&mut layout, &holes)?;
         crate::cut::cut_cutouts(&mut layout)?;
-        if layout.flat.cutouts.len() != n {
-            return Err(SheetError::Unsupported(
-                "a cut-out across a cone's edge".into(),
-            ));
-        }
-        // Their edges go onto the sheet's faces by projection, which takes
-        // them only within a quarter turn around the axis.
-        let span = |points: Vec<P2>| {
-            let turns = points.iter().map(|&p| self.developed(p).0);
-            let (lo, hi) = turns.fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(t), hi.max(t)));
-            hi - lo
-        };
-        let circles = layout.flat.holes.iter().map(|h| {
-            (0..64)
-                .map(|i| {
-                    let a = TAU * i as f64 / 64.0;
-                    let r = h.diameter / 2.0;
-                    [h.center[0] + r * a.cos(), h.center[1] + r * a.sin()]
-                })
-                .collect::<Vec<_>>()
-        });
-        let rings = layout.flat.cutouts.iter().map(|ring| {
-            let n = ring.points.len();
-            (0..n)
-                .flat_map(|k| {
-                    let (p, q) = (ring.points[k], ring.points[(k + 1) % n]);
-                    let arc = ring.arcs[k].and_then(Curve::arc);
-                    (0..16).map(move |i| {
-                        let f = i as f64 / 16.0;
-                        match arc {
-                            None => [p[0] + f * (q[0] - p[0]), p[1] + f * (q[1] - p[1])],
-                            Some(arc) => {
-                                let c = arc.center;
-                                let r = (p[0] - c[0]).hypot(p[1] - c[1]);
-                                let a = (p[1] - c[1]).atan2(p[0] - c[0]) + f * arc.sweep(p, q);
-                                [c[0] + r * a.cos(), c[1] + r * a.sin()]
-                            }
-                        }
-                    })
-                })
-                .collect::<Vec<_>>()
-        });
-        if circles.chain(rings).any(|points| span(points) > 0.45 * PI) {
-            return Err(SheetError::Unsupported(
-                "a hole or cut-out reaching a quarter turn around a cone's axis".into(),
-            ));
-        }
         Ok(layout.flat)
     }
 
@@ -338,535 +294,463 @@ impl Section {
     }
 
     fn solid(&self, flat: &FlatPattern) -> Result<BrepEnvelope, GeometryError> {
-        let (b, l) = (self.sweep, self.l);
+        let b = self.sweep;
         let mut builder = Builder::new("gusset".into(), accuracy())?;
-        let corner = |th: usize, vi: usize, oi: usize| {
-            self.point(self.at(vi as f64 * l, self.o[oi]), th as f64 * b)
-        };
-        // Vertex [theta end][slant end][face].
-        let mut v = [[[0u32; 2]; 2]; 2];
-        for (th, vi, oi) in triples() {
-            v[th][vi][oi] = builder.vertex(corner(th, vi, oi));
-        }
-        let line = |builder: &mut Builder, p: P3, q: P3| {
-            let length = norm(sub(q, p));
-            builder.edge(
-                CurveGeometry::Line {
-                    origin: p,
-                    direction: sub(q, p).map(|x| x / length),
-                },
-                Interval::new(0.0, length).expect("a positive length"),
-                false,
-            )
-        };
-        // Arcs [slant end][face], slant lines [theta end][face], lines
-        // through the sheet [theta end][slant end]; each from its lower index.
-        let (mut arc, mut slant, mut through) = ([[0u32; 2]; 2], [[0u32; 2]; 2], [[0u32; 2]; 2]);
-        for vi in 0..2 {
-            for oi in 0..2 {
-                let q = self.at(vi as f64 * l, self.o[oi]);
-                arc[vi][oi] = builder.edge(
-                    CurveGeometry::Circle {
-                        frame: Frame3 {
-                            origin: [0.0, 0.0, q[1]],
-                            x: [1.0, 0.0, 0.0],
-                            y: [0.0, 1.0, 0.0],
-                            z: [0.0, 0.0, 1.0],
-                        },
-                        radius: q[0],
-                    },
-                    Interval::new(0.0, b)?,
-                    false,
-                );
-            }
-        }
-        for th in 0..2 {
-            for oi in 0..2 {
-                slant[th][oi] = line(&mut builder, corner(th, 0, oi), corner(th, 1, oi));
-            }
-            for vi in 0..2 {
-                through[th][vi] = line(&mut builder, corner(th, vi, 0), corner(th, vi, 1));
-            }
-        }
-
-        let mid = |vf: f64, of: f64| self.at(vf * l, self.o[0] + of * (self.o[1] - self.o[0]));
+        let r = Rolled::new(self);
+        let (outer, mut walls) = self.rim(&r, &mut builder, flat)?;
+        let (inner, cut_walls) = self.cuts(&r, &mut builder, flat)?;
+        walls.extend(cut_walls);
         let theta_mid = b / 2.0;
         let toward = |n: P2, theta: f64| [n[0] * theta.cos(), n[0] * theta.sin(), n[1]];
-        let neg = |p: P2| [-p[0], -p[1]];
-        let outward_o = if self.o[1] > self.o[0] {
-            [self.m, neg(self.m)]
+        let outward = if self.o[1] > self.o[0] {
+            [[-self.m[0], -self.m[1]], self.m]
         } else {
-            [neg(self.m), self.m]
+            [self.m, [-self.m[0], -self.m[1]]]
         };
-        // Points over a face turned from the meridian segment a..b.
-        let turned = |a: P2, c: P2| -> Vec<P3> {
-            (0..=32)
-                .flat_map(|i| {
-                    (0..=2).map(move |j| {
-                        let f = j as f64 / 2.0;
-                        (i, [a[0] + f * (c[0] - a[0]), a[1] + f * (c[1] - a[1])])
-                    })
-                })
-                .map(|(i, q)| self.point(q, b * i as f64 / 32.0))
-                .collect()
-        };
-        // (key, surface, a point inside, its outward normal, points over it,
-        // loop as (edge, from, to, forward)).
-        type Loop = Vec<(u32, u32, u32, bool)>;
-        let mut faces: Vec<(String, SurfaceGeometry, P3, P3, Vec<P3>, Loop)> = Vec::new();
         for oi in 0..2 {
             let q = self.at(0.0, self.o[oi]);
-            let inside = mid(0.5, oi as f64);
-            faces.push((
-                format!("sheet.{oi}"),
-                self.surface(q, self.d),
-                self.point(inside, theta_mid),
-                toward(outward_o[1 - oi], theta_mid),
-                turned(q, self.at(l, self.o[oi])),
-                vec![
-                    (arc[0][oi], v[0][0][oi], v[1][0][oi], true),
-                    (slant[1][oi], v[1][0][oi], v[1][1][oi], true),
-                    (arc[1][oi], v[1][1][oi], v[0][1][oi], false),
-                    (slant[0][oi], v[0][1][oi], v[0][0][oi], false),
-                ],
-            ));
-        }
-        for vi in 0..2 {
-            let q = self.at(vi as f64 * l, 0.0);
-            let out = if vi == 0 { neg(self.d) } else { self.d };
-            faces.push((
-                format!("end.{vi}"),
-                self.surface(q, self.m),
-                self.point(mid(vi as f64, 0.5), theta_mid),
-                toward(out, theta_mid),
-                turned(q, self.at(vi as f64 * l, self.o[1])),
-                vec![
-                    (arc[vi][0], v[0][vi][0], v[1][vi][0], true),
-                    (through[1][vi], v[1][vi][0], v[1][vi][1], true),
-                    (arc[vi][1], v[1][vi][1], v[0][vi][1], false),
-                    (through[0][vi], v[0][vi][1], v[0][vi][0], false),
-                ],
-            ));
-        }
-        for th in 0..2 {
-            let theta = th as f64 * b;
-            let normal = if th == 0 {
-                [0.0, -1.0, 0.0]
-            } else {
-                [-theta.sin(), theta.cos(), 0.0]
-            };
-            let radial = [theta.cos(), theta.sin(), 0.0];
-            let frame = Frame3 {
-                origin: [0.0; 3],
-                x: radial,
-                y: cross(normal, radial),
-                z: normal,
-            };
-            faces.push((
-                format!("side.{th}"),
-                SurfaceGeometry::Plane { frame },
-                self.point(mid(0.5, 0.5), theta),
-                normal,
-                triples()
-                    .filter(|c| c.0 == th)
-                    .map(|(th, vi, oi)| corner(th, vi, oi))
-                    .collect(),
-                vec![
-                    (slant[th][0], v[th][0][0], v[th][1][0], true),
-                    (through[th][1], v[th][1][0], v[th][1][1], true),
-                    (slant[th][1], v[th][1][1], v[th][0][1], false),
-                    (through[th][0], v[th][0][1], v[th][0][0], false),
-                ],
-            ));
-        }
-
-        let (inner, walls) = self.cuts(&mut builder, flat)?;
-
-        for (key, surface, inside, outward, samples, edges) in faces {
+            let surface = self.surface(q, self.d);
+            let inside = self.point(self.at(self.l / 2.0, self.o[oi]), theta_mid);
             let hint = surface.project(inside, None)?;
-            let sense = |forward: bool| {
-                if forward {
-                    Orientation::Forward
-                } else {
-                    Orientation::Reverse
-                }
-            };
-            let mut uses = Vec::new();
-            for &(e, from, to, forward) in &edges {
-                uses.push(match &surface {
-                    SurfaceGeometry::Plane { frame } => {
-                        plane_boundary(&builder, *frame, e, from, to, sense(forward))?
-                    }
-                    _ => projected_boundary(
-                        &builder,
-                        &surface,
-                        e,
-                        from,
-                        to,
-                        sense(forward),
-                        Some(hint),
-                    )?,
-                });
-            }
-            // The face's parameter box.
+            // The face's parameter box: points over the whole turned sheet.
             let mut bounds = [[f64::MAX, f64::MIN]; 2];
-            for &point in &samples {
-                let uv = surface.project(point, Some(hint))?;
-                for j in 0..2 {
-                    bounds[j][0] = bounds[j][0].min(uv[j]);
-                    bounds[j][1] = bounds[j][1].max(uv[j]);
-                }
-            }
-            let pad = 1e-6;
-            let bounds = bounds.map(|[lo, hi]| [lo - pad, hi + pad]);
-            let normal = surface.normal_at(hint)?;
-            // The holes and cut-outs on a face of the sheet, clockwise in the flat.
-            let mut holes = Vec::new();
-            if let Some(oi) = key
-                .strip_prefix("sheet.")
-                .map(|k| k.parse::<usize>().unwrap())
-            {
-                for ring in &inner[oi] {
-                    let mut uses = Vec::new();
-                    for &(e, from, to, sense, at) in ring {
-                        let near = surface.project(at, Some(hint))?;
-                        uses.push(projected_boundary(
-                            &builder,
-                            &surface,
-                            e,
-                            from,
-                            to,
-                            sense,
-                            Some(near),
-                        )?);
+            for i in 0..=32 {
+                for j in 0..=2 {
+                    let v = self.l * j as f64 / 2.0;
+                    let point = self.point(self.at(v, self.o[oi]), b * i as f64 / 32.0);
+                    let uv = surface.project(point, Some(hint))?;
+                    for k in 0..2 {
+                        bounds[k][0] = bounds[k][0].min(uv[k]);
+                        bounds[k][1] = bounds[k][1].max(uv[k]);
                     }
-                    holes.push(uses);
                 }
             }
+            let bounds = bounds.map(|[lo, hi]| [lo - 1e-6, hi + 1e-6]);
+            let along = |loop_: &[(u32, u32, u32, Orientation, P3)]| {
+                loop_
+                    .iter()
+                    .map(|&(e, from, to, sense, at)| {
+                        let near = surface.project(at, Some(hint))?;
+                        projected_boundary(&builder, &surface, e, from, to, sense, Some(near))
+                    })
+                    .collect::<Result<Vec<Use>, GeometryError>>()
+            };
+            let uses = along(&outer[oi])?;
+            // The holes and cut-outs, clockwise in the flat.
+            let holes = inner[oi]
+                .iter()
+                .map(|ring| along(ring))
+                .collect::<Result<Vec<_>, _>>()?;
+            let normal = surface.normal_at(hint)?;
+            let key = format!("sheet.{oi}");
             let face = builder.face_with_holes(&key, surface, bounds, uses, holes)?;
-            if dot(normal, outward) < 0.0 {
+            if dot(normal, toward(outward[oi], theta_mid)) < 0.0 {
                 builder.set_face_sense(face, Orientation::Reverse)?;
             }
         }
-        for (key, surface, bounds, uses, mid, into) in walls {
-            let normal = surface.normal_at(mid)?;
-            let face = builder.face(&key, surface, bounds, uses)?;
-            // The wall faces out of the material, into the cut.
-            if dot(normal, into) < 0.0 {
+        for wall in walls {
+            let normal = wall.surface.normal_at(wall.mid)?;
+            let face = builder.face(&wall.key, wall.surface, wall.bounds, wall.uses)?;
+            if dot(normal, wall.out) < 0.0 {
                 builder.set_face_sense(face, Orientation::Reverse)?;
             }
         }
         builder.finish_solid()
     }
 
-    /// The edges of the holes and cut-outs on both faces of the sheet, and
-    /// their walls: per face, the inner loops as (edge, from, to, sense, a
-    /// point at from); the walls as (key, surface, bounds, uses, a UV in
-    /// the middle, the way into the cut there).
+    /// The flat outline's edges on both faces of the sheet, in its order
+    /// (per face: edge, from, to, sense, the point where the edge starts), and its walls:
+    /// the ends (cones square to the sheet), the sides (meridian planes) and
+    /// the walls of notches cut into them.
+    #[allow(clippy::type_complexity)]
+    fn rim(
+        &self,
+        r: &Rolled,
+        builder: &mut Builder,
+        flat: &FlatPattern,
+    ) -> Result<([Vec<(u32, u32, u32, Orientation, P3)>; 2], Vec<Wall>), GeometryError> {
+        let (b, l) = (self.sweep, self.l);
+        let points = &flat.outline;
+        let n = points.len();
+        let corners: Vec<[u32; 2]> = points
+            .iter()
+            .map(|&p| [0, 1].map(|oi| builder.vertex(r.at(p, oi))))
+            .collect();
+        let mut verticals = Vec::with_capacity(n);
+        for &p in points {
+            verticals.push(r.vertical(builder, p, false)?);
+        }
+        // Up through the sheet from face 0 to face 1.
+        let up = if r.lo == 0 {
+            Orientation::Forward
+        } else {
+            Orientation::Reverse
+        };
+        let down = if r.lo == 0 {
+            Orientation::Reverse
+        } else {
+            Orientation::Forward
+        };
+        let same = |a: f64, c: f64| (a - c).abs() < 1e-7;
+        let mut walls = Vec::new();
+        let mut keys = std::collections::HashMap::<String, usize>::new();
+        let mut key = |base: String| {
+            let count = keys.entry(base.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                base
+            } else {
+                format!("{base}#{}", *count - 1)
+            }
+        };
+        let mut segments: Vec<(Vec<Piece3>, bool)> = Vec::with_capacity(n);
+        for k in 0..n {
+            let j = (k + 1) % n;
+            let (p, q) = (points[k], points[j]);
+            let ((tp, vp), (tq, vq)) = (r.place(p), r.place(q));
+            // Its middle too: a notch's arc may end on an end or a side.
+            let middle = match flat.outline_arcs[k].and_then(Curve::arc) {
+                None => [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0],
+                Some(a) => {
+                    let c = a.center;
+                    let turn = (p[1] - c[1]).atan2(p[0] - c[0]) + a.sweep(p, q) / 2.0;
+                    let radius = (p[0] - c[0]).hypot(p[1] - c[1]);
+                    [c[0] + radius * turn.cos(), c[1] + radius * turn.sin()]
+                }
+            };
+            let (tm, vm) = r.place(middle);
+            let end = [0.0, l]
+                .iter()
+                .position(|&v| same(vp, v) && same(vq, v) && same(vm, v));
+            let side = [0.0, b]
+                .iter()
+                .position(|&t| same(tp, t) && same(tq, t) && same(tm, t));
+            if let Some(vi) = end {
+                // An end: arcs round the axis, run with the angle.
+                let forward = tp < tq;
+                let (t0, t1) = (tp.min(tq), tp.max(tq));
+                let (s, e) = if forward { (k, j) } else { (j, k) };
+                let span = Interval::new(t0, t1)?;
+                let edges = self.o.map(|o| {
+                    let c = self.at(vi as f64 * l, o);
+                    builder.edge(
+                        CurveGeometry::Circle {
+                            frame: Frame3 {
+                                origin: [0.0, 0.0, c[1]],
+                                x: [1.0, 0.0, 0.0],
+                                y: [0.0, 1.0, 0.0],
+                                z: [0.0, 0.0, 1.0],
+                            },
+                            radius: c[0],
+                        },
+                        span,
+                        false,
+                    )
+                });
+                let q0 = self.at(vi as f64 * l, 0.0);
+                let surface = self.surface(q0, self.m);
+                let through = |f: f64| self.o[0] + f * (self.o[1] - self.o[0]);
+                let mid = (t0 + t1) / 2.0;
+                let samples: Vec<P3> = (0..=32)
+                    .flat_map(|i| {
+                        (0..=2).map(move |jj| (t0 + (t1 - t0) * i as f64 / 32.0, jj as f64 / 2.0))
+                    })
+                    .map(|(t, f)| self.point(self.at(vi as f64 * l, through(f)), t))
+                    .collect();
+                let inside = self.point(self.at(vi as f64 * l, through(0.5)), mid);
+                let out = if vi == 0 {
+                    [-self.d[0], -self.d[1]]
+                } else {
+                    self.d
+                };
+                let loop_ = [
+                    (edges[0], corners[s][0], corners[e][0], Orientation::Forward),
+                    (verticals[e], corners[e][0], corners[e][1], up),
+                    (edges[1], corners[e][1], corners[s][1], Orientation::Reverse),
+                    (verticals[s], corners[s][1], corners[s][0], down),
+                ];
+                walls.push(self.wall(
+                    builder,
+                    key(format!("end.{vi}")),
+                    surface,
+                    &loop_,
+                    inside,
+                    [out[0] * mid.cos(), out[0] * mid.sin(), out[1]],
+                    &samples,
+                )?);
+                let piece = (edges, corners[s], corners[e], points[s], points[e]);
+                segments.push((vec![piece], forward));
+            } else if let Some(th) = side {
+                // A side: straight up the slant, from its lower end.
+                let forward = vp < vq;
+                let (s, e) = if forward { (k, j) } else { (j, k) };
+                let edges = [
+                    line(builder, r.at(points[s], 0), r.at(points[e], 0))?,
+                    line(builder, r.at(points[s], 1), r.at(points[e], 1))?,
+                ];
+                let theta = th as f64 * b;
+                let normal = if th == 0 {
+                    [0.0, -1.0, 0.0]
+                } else {
+                    [-theta.sin(), theta.cos(), 0.0]
+                };
+                let radial = [theta.cos(), theta.sin(), 0.0];
+                let surface = SurfaceGeometry::Plane {
+                    frame: Frame3 {
+                        origin: [0.0; 3],
+                        x: radial,
+                        y: cross(normal, radial),
+                        z: normal,
+                    },
+                };
+                let samples: Vec<P3> = [s, e]
+                    .iter()
+                    .flat_map(|&c| [0, 1].map(|oi| r.at(points[c], oi)))
+                    .collect();
+                let (va, vb) = (vp.min(vq), vp.max(vq));
+                let inside = self.point(
+                    self.at((va + vb) / 2.0, (self.o[0] + self.o[1]) / 2.0),
+                    theta,
+                );
+                let loop_ = [
+                    (edges[0], corners[s][0], corners[e][0], Orientation::Forward),
+                    (verticals[e], corners[e][0], corners[e][1], up),
+                    (edges[1], corners[e][1], corners[s][1], Orientation::Reverse),
+                    (verticals[s], corners[s][1], corners[s][0], down),
+                ];
+                walls.push(self.wall(
+                    builder,
+                    key(format!("side.{th}")),
+                    surface,
+                    &loop_,
+                    inside,
+                    normal,
+                    &samples,
+                )?);
+                let piece = (edges, corners[s], corners[e], points[s], points[e]);
+                segments.push((vec![piece], forward));
+            } else {
+                // A notch's edge: the material lies on its left.
+                let arc = flat.outline_arcs[k].and_then(Curve::arc);
+                let (pieces, forward, wall) = r.segment(
+                    builder,
+                    [p, q],
+                    arc,
+                    [corners[k], corners[j]],
+                    [verticals[k], verticals[j]],
+                    key(format!("notch.{k}")),
+                    -1.0,
+                )?;
+                walls.push(wall);
+                segments.push((pieces, forward));
+            }
+        }
+        let mut outer: [Vec<_>; 2] = [Vec::new(), Vec::new()];
+        for (oi, uses) in outer.iter_mut().enumerate() {
+            for (list, forward) in &segments {
+                if *forward {
+                    uses.extend(list.iter().map(|&(e, a, c, x, _)| {
+                        (e[oi], a[oi], c[oi], Orientation::Forward, r.at(x, oi))
+                    }));
+                } else {
+                    uses.extend(list.iter().rev().map(|&(e, a, c, x, _)| {
+                        (e[oi], c[oi], a[oi], Orientation::Reverse, r.at(x, oi))
+                    }));
+                }
+            }
+        }
+        Ok((outer, walls))
+    }
+
+    /// An end or side wall: its loop on an analytic surface, its parameter
+    /// box from points over it, facing `out` at `inside`.
+    #[allow(clippy::too_many_arguments)]
+    fn wall(
+        &self,
+        builder: &Builder,
+        key: String,
+        surface: SurfaceGeometry,
+        loop_: &[(u32, u32, u32, Orientation)],
+        inside: P3,
+        out: P3,
+        samples: &[P3],
+    ) -> Result<Wall, GeometryError> {
+        let hint = surface.project(inside, None)?;
+        let mut uses = Vec::with_capacity(loop_.len());
+        for &(e, from, to, sense) in loop_ {
+            uses.push(match &surface {
+                SurfaceGeometry::Plane { frame } => {
+                    plane_boundary(builder, *frame, e, from, to, sense)?
+                }
+                _ => projected_boundary(builder, &surface, e, from, to, sense, Some(hint))?,
+            });
+        }
+        let mut bounds = [[f64::MAX, f64::MIN]; 2];
+        for &point in samples {
+            let uv = surface.project(point, Some(hint))?;
+            for k in 0..2 {
+                bounds[k][0] = bounds[k][0].min(uv[k]);
+                bounds[k][1] = bounds[k][1].max(uv[k]);
+            }
+        }
+        Ok(Wall {
+            key,
+            surface,
+            bounds: bounds.map(|[lo, hi]| [lo - 1e-6, hi + 1e-6]),
+            uses,
+            mid: hint,
+            out,
+        })
+    }
+
+    /// The edges of the holes and cut-outs on both faces of the sheet (per
+    /// face, the inner loops as (edge, from, to, sense, the edge's start)),
+    /// and their walls.
     #[allow(clippy::type_complexity)]
     fn cuts(
         &self,
+        r: &Rolled,
         builder: &mut Builder,
         flat: &FlatPattern,
-    ) -> Result<
-        (
-            [Vec<Vec<(u32, u32, u32, Orientation, P3)>>; 2],
-            Vec<(
-                String,
-                SurfaceGeometry,
-                [[f64; 2]; 2],
-                Vec<Use>,
-                [f64; 2],
-                P3,
-            )>,
-        ),
-        GeometryError,
-    > {
-        let wrap = self.wrap();
-        let t = self.t;
-        let z = [self.level(0), self.level(1)];
-        let (lo, hi) = if z[0] < z[1] { (0, 1) } else { (1, 0) };
-        let to = |p: P2| self.to_wrap(p);
-        let dir = |v: P2| self.to_wrap_dir(v);
-        let at = |p: P2, oi: usize| {
-            let q = to(p);
-            wrap.point([q[0], q[1], z[oi]])
-        };
-        // The way into the cut from flat point p along flat direction d, mid-sheet.
-        let into = |p: P2, d: P2| {
-            let mid = (z[0] + z[1]) / 2.0;
-            let h = 1e-6;
-            let (q, e) = (to(p), dir(d));
-            sub(
-                wrap.point([q[0] + h * e[0], q[1] + h * e[1], mid]),
-                wrap.point([q[0], q[1], mid]),
-            )
-        };
-        let flat_frame = |c: P2, zz: f64| {
-            let (o, x, y) = (to(c), dir([1.0, 0.0]), dir([0.0, 1.0]));
-            Frame3 {
-                origin: [o[0], o[1], zz],
-                x: [x[0], x[1], 0.0],
-                y: [y[0], y[1], 0.0],
-                z: [0.0, 0.0, 1.0],
-            }
-        };
-        let wrapped = |curve: CurveGeometry| CurveGeometry::Wrapped {
-            wrap,
-            curve: Box::new(curve),
-        };
-        let vertical = |builder: &mut Builder, p: P2, seam: bool| -> Result<u32, GeometryError> {
-            let (a, c) = (at(p, lo), at(p, hi));
-            Ok(builder.edge(
-                CurveGeometry::Line {
-                    origin: a,
-                    direction: sub(c, a).map(|x| x / norm(sub(c, a))),
-                },
-                Interval::new(0.0, t)?,
-                seam,
-            ))
-        };
+    ) -> Result<([Vec<Vec<(u32, u32, u32, Orientation, P3)>>; 2], Vec<Wall>), GeometryError> {
+        let (t, lo, hi, z) = (self.t, r.lo, r.hi, r.z);
         let mut inner: [Vec<Vec<_>>; 2] = [Vec::new(), Vec::new()];
         let mut walls = Vec::new();
 
         for (k, h) in flat.holes.iter().enumerate() {
-            let r = h.diameter / 2.0;
-            let sp = [h.center[0] + r, h.center[1]];
-            let v = [0, 1].map(|oi| builder.vertex(at(sp, oi)));
-            let mut circle = [0; 2];
-            for oi in 0..2 {
-                circle[oi] = builder.edge(
-                    wrapped(CurveGeometry::Circle {
-                        frame: flat_frame(h.center, z[oi]),
-                        radius: r,
-                    }),
-                    Interval::new(0.0, TAU)?,
-                    false,
-                );
-                inner[oi].push(vec![(
-                    circle[oi],
-                    v[oi],
-                    v[oi],
-                    Orientation::Reverse,
-                    at(sp, oi),
-                )]);
+            let rad = h.diameter / 2.0;
+            let on = |a: f64| [h.center[0] + rad * a.cos(), h.center[1] + rad * a.sin()];
+            let m = r.pieces(&|f| on(TAU * f));
+            let angle = |j: usize| TAU * j as f64 / m as f64;
+            let v: Vec<[u32; 2]> = (0..m)
+                .map(|j| [0, 1].map(|oi| builder.vertex(r.at(on(angle(j)), oi))))
+                .collect();
+            let mut arcs = Vec::with_capacity(m);
+            for j in 0..m {
+                let mut e = [0; 2];
+                for oi in 0..2 {
+                    e[oi] = builder.edge(
+                        r.wrapped(CurveGeometry::Circle {
+                            frame: r.flat_frame(h.center, z[oi]),
+                            radius: rad,
+                        }),
+                        Interval::new(angle(j), angle(j + 1))?,
+                        false,
+                    );
+                }
+                arcs.push(e);
             }
-            let seam = vertical(builder, sp, true)?;
-            walls.push((
-                format!("hole.{k}"),
-                SurfaceGeometry::Wrapped {
-                    wrap,
+            let next = |j: usize| (j + 1) % m;
+            for oi in 0..2 {
+                inner[oi].push(
+                    (0..m)
+                        .rev()
+                        .map(|j| {
+                            let start = r.at(on(angle(j)), oi);
+                            (
+                                arcs[j][oi],
+                                v[next(j)][oi],
+                                v[j][oi],
+                                Orientation::Reverse,
+                                start,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            let seam = r.vertical(builder, on(0.0), true)?;
+            let mut uses: Vec<Use> = (0..m)
+                .map(|j| {
+                    let line = uv_line([0.0, 0.0], [1.0, 0.0]);
+                    boundary(
+                        arcs[j][lo],
+                        v[j][lo],
+                        v[next(j)][lo],
+                        Orientation::Forward,
+                        line,
+                    )
+                })
+                .collect();
+            uses.push(boundary(
+                seam,
+                v[0][lo],
+                v[0][hi],
+                Orientation::Forward,
+                uv_line([TAU, 0.0], [0.0, 1.0]),
+            ));
+            uses.extend((0..m).rev().map(|j| {
+                let line = uv_line([0.0, t], [1.0, 0.0]);
+                boundary(
+                    arcs[j][hi],
+                    v[next(j)][hi],
+                    v[j][hi],
+                    Orientation::Reverse,
+                    line,
+                )
+            }));
+            uses.push(boundary(
+                seam,
+                v[0][hi],
+                v[0][lo],
+                Orientation::Reverse,
+                uv_line([0.0, 0.0], [0.0, 1.0]),
+            ));
+            walls.push(Wall {
+                key: format!("hole.{k}"),
+                surface: SurfaceGeometry::Wrapped {
+                    wrap: r.wrap,
                     surface: Box::new(SurfaceGeometry::Cylinder {
-                        frame: flat_frame(h.center, z[lo]),
-                        radius: r,
+                        frame: r.flat_frame(h.center, z[lo]),
+                        radius: rad,
                     }),
                 },
-                [[0.0, TAU], [0.0, t]],
-                vec![
-                    boundary(
-                        circle[lo],
-                        v[lo],
-                        v[lo],
-                        Orientation::Forward,
-                        uv_line([0.0, 0.0], [1.0, 0.0]),
-                    ),
-                    boundary(
-                        seam,
-                        v[lo],
-                        v[hi],
-                        Orientation::Forward,
-                        uv_line([TAU, 0.0], [0.0, 1.0]),
-                    ),
-                    boundary(
-                        circle[hi],
-                        v[hi],
-                        v[hi],
-                        Orientation::Reverse,
-                        uv_line([0.0, t], [1.0, 0.0]),
-                    ),
-                    boundary(
-                        seam,
-                        v[hi],
-                        v[lo],
-                        Orientation::Reverse,
-                        uv_line([0.0, 0.0], [0.0, 1.0]),
-                    ),
-                ],
-                [PI, t / 2.0],
-                into([h.center[0] - r, h.center[1]], [1.0, 0.0]),
-            ));
+                bounds: [[0.0, TAU], [0.0, t]],
+                uses,
+                mid: [PI, t / 2.0],
+                out: r.into([h.center[0] - rad, h.center[1]], [1.0, 0.0]),
+            });
         }
 
         for (k, ring) in flat.cutouts.iter().enumerate() {
             let n = ring.points.len();
-            let v: Vec<[u32; 2]> = ring
+            let corners: Vec<[u32; 2]> = ring
                 .points
                 .iter()
-                .map(|&p| [0, 1].map(|oi| builder.vertex(at(p, oi))))
+                .map(|&p| [0, 1].map(|oi| builder.vertex(r.at(p, oi))))
                 .collect();
             let mut verticals = Vec::with_capacity(n);
             for &p in &ring.points {
-                verticals.push(vertical(builder, p, false)?);
+                verticals.push(r.vertical(builder, p, false)?);
             }
-            // Per segment: its edge on each face, and whether it runs p -> q.
             let mut segments = Vec::with_capacity(n);
             for i in 0..n {
                 let j = (i + 1) % n;
-                let (p, q) = (ring.points[i], ring.points[j]);
-                let (edges, forward) = match ring.arcs[i].and_then(Curve::arc) {
-                    None => {
-                        let d = [q[0] - p[0], q[1] - p[1]];
-                        let len = d[0].hypot(d[1]);
-                        let u = [d[0] / len, d[1] / len];
-                        let (o, uw) = (to(p), dir(u));
-                        let mut edges = [0; 2];
-                        for oi in 0..2 {
-                            edges[oi] = builder.edge(
-                                wrapped(CurveGeometry::Line {
-                                    origin: [o[0], o[1], z[oi]],
-                                    direction: [uw[0], uw[1], 0.0],
-                                }),
-                                Interval::new(0.0, len)?,
-                                false,
-                            );
-                        }
-                        walls.push((
-                            format!("cut.{k}.{i}"),
-                            SurfaceGeometry::Wrapped {
-                                wrap,
-                                surface: Box::new(SurfaceGeometry::Plane {
-                                    frame: Frame3 {
-                                        origin: [o[0], o[1], z[lo]],
-                                        x: [uw[0], uw[1], 0.0],
-                                        y: [0.0, 0.0, 1.0],
-                                        z: [uw[1], -uw[0], 0.0],
-                                    },
-                                }),
-                            },
-                            [[0.0, len], [0.0, t]],
-                            vec![
-                                boundary(
-                                    edges[lo],
-                                    v[i][lo],
-                                    v[j][lo],
-                                    Orientation::Forward,
-                                    uv_line([0.0, 0.0], [1.0, 0.0]),
-                                ),
-                                boundary(
-                                    verticals[j],
-                                    v[j][lo],
-                                    v[j][hi],
-                                    Orientation::Forward,
-                                    uv_line([len, 0.0], [0.0, 1.0]),
-                                ),
-                                boundary(
-                                    edges[hi],
-                                    v[j][hi],
-                                    v[i][hi],
-                                    Orientation::Reverse,
-                                    uv_line([0.0, t], [1.0, 0.0]),
-                                ),
-                                boundary(
-                                    verticals[i],
-                                    v[i][hi],
-                                    v[i][lo],
-                                    Orientation::Reverse,
-                                    uv_line([0.0, 0.0], [0.0, 1.0]),
-                                ),
-                            ],
-                            [len / 2.0, t / 2.0],
-                            into([p[0] + d[0] / 2.0, p[1] + d[1] / 2.0], [-u[1], u[0]]),
-                        ));
-                        (edges, true)
-                    }
-                    Some(arc) => {
-                        let c = arc.center;
-                        let r = (p[0] - c[0]).hypot(p[1] - c[1]);
-                        let a_p = (p[1] - c[1]).atan2(p[0] - c[0]);
-                        let sweep = arc.sweep(p, q);
-                        // The edge runs with the angle, from s to e.
-                        let (a0, a1, s, e) = if sweep > 0.0 {
-                            (a_p, a_p + sweep, i, j)
-                        } else {
-                            (a_p + sweep, a_p, j, i)
-                        };
-                        let mut edges = [0; 2];
-                        for oi in 0..2 {
-                            edges[oi] = builder.edge(
-                                wrapped(CurveGeometry::Circle {
-                                    frame: flat_frame(c, z[oi]),
-                                    radius: r,
-                                }),
-                                Interval::new(a0, a1)?,
-                                false,
-                            );
-                        }
-                        let am = (a0 + a1) / 2.0;
-                        let (sm, cm) = am.sin_cos();
-                        // Left of p -> q there.
-                        let left = if sweep > 0.0 { [-cm, -sm] } else { [cm, sm] };
-                        walls.push((
-                            format!("cut.{k}.{i}"),
-                            SurfaceGeometry::Wrapped {
-                                wrap,
-                                surface: Box::new(SurfaceGeometry::Cylinder {
-                                    frame: flat_frame(c, z[lo]),
-                                    radius: r,
-                                }),
-                            },
-                            [[a0, a1], [0.0, t]],
-                            vec![
-                                boundary(
-                                    edges[lo],
-                                    v[s][lo],
-                                    v[e][lo],
-                                    Orientation::Forward,
-                                    uv_line([0.0, 0.0], [1.0, 0.0]),
-                                ),
-                                boundary(
-                                    verticals[e],
-                                    v[e][lo],
-                                    v[e][hi],
-                                    Orientation::Forward,
-                                    uv_line([a1, 0.0], [0.0, 1.0]),
-                                ),
-                                boundary(
-                                    edges[hi],
-                                    v[e][hi],
-                                    v[s][hi],
-                                    Orientation::Reverse,
-                                    uv_line([0.0, t], [1.0, 0.0]),
-                                ),
-                                boundary(
-                                    verticals[s],
-                                    v[s][hi],
-                                    v[s][lo],
-                                    Orientation::Reverse,
-                                    uv_line([a0, 0.0], [0.0, 1.0]),
-                                ),
-                            ],
-                            [am, t / 2.0],
-                            into([c[0] + r * cm, c[1] + r * sm], left),
-                        ));
-                        (edges, sweep > 0.0)
-                    }
-                };
-                segments.push((edges, forward));
+                let (pieces, forward, wall) = r.segment(
+                    builder,
+                    [ring.points[i], ring.points[j]],
+                    ring.arcs[i].and_then(Curve::arc),
+                    [corners[i], corners[j]],
+                    [verticals[i], verticals[j]],
+                    format!("cut.{k}.{i}"),
+                    1.0,
+                )?;
+                walls.push(wall);
+                segments.push((pieces, forward));
             }
+            // Each face's loop runs the ring backwards, q -> p.
             for oi in 0..2 {
-                let ring_uses = (0..n)
-                    .rev()
-                    .map(|i| {
-                        let j = (i + 1) % n;
-                        let (edges, forward) = segments[i];
-                        let sense = if forward {
-                            Orientation::Reverse
-                        } else {
-                            Orientation::Forward
-                        };
-                        (edges[oi], v[j][oi], v[i][oi], sense, at(ring.points[j], oi))
-                    })
-                    .collect();
+                let mut ring_uses = Vec::new();
+                for (list, forward) in segments.iter().rev() {
+                    if *forward {
+                        ring_uses.extend(list.iter().rev().map(|&(e, a, b, x, _)| {
+                            (e[oi], b[oi], a[oi], Orientation::Reverse, r.at(x, oi))
+                        }));
+                    } else {
+                        ring_uses.extend(list.iter().map(|&(e, a, b, x, _)| {
+                            (e[oi], a[oi], b[oi], Orientation::Forward, r.at(x, oi))
+                        }));
+                    }
+                }
                 inner[oi].push(ring_uses);
             }
         }
@@ -875,7 +759,17 @@ impl Section {
 
     /// The mass of the sheet less its holes and cut-outs, with their walls.
     fn mass(&self, flat: &FlatPattern) -> Mass {
-        let whole = self.plain_mass();
+        // Closed form, or with notches in the edge, over the outline.
+        let whole = if flat.outline == self.pattern().outline {
+            self.plain_mass()
+        } else {
+            let (sheet, wall) = self.removed(&pieces(&flat.outline, &flat.outline_arcs));
+            Mass {
+                volume: sheet[0],
+                area: sheet[1] + sheet[2] + wall,
+                center_of_mass: [3, 4, 5].map(|j| sheet[j] / sheet[0]),
+            }
+        };
         let mut volume = whole.volume;
         let mut area = whole.area;
         let mut moment = whole.center_of_mass.map(|c| c * whole.volume);
@@ -883,26 +777,10 @@ impl Section {
             .holes
             .iter()
             .map(|h| vec![Piece::Arc(h.center, h.diameter / 2.0, 0.0, TAU)]);
-        let rings = flat.cutouts.iter().map(|ring| {
-            let n = ring.points.len();
-            (0..n)
-                .map(|k| {
-                    let (p, q) = (ring.points[k], ring.points[(k + 1) % n]);
-                    match ring.arcs[k].and_then(Curve::arc) {
-                        None => Piece::Line(p, q),
-                        Some(arc) => {
-                            let c = arc.center;
-                            Piece::Arc(
-                                c,
-                                (p[0] - c[0]).hypot(p[1] - c[1]),
-                                (p[1] - c[1]).atan2(p[0] - c[0]),
-                                arc.sweep(p, q),
-                            )
-                        }
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
+        let rings = flat
+            .cutouts
+            .iter()
+            .map(|ring| pieces(&ring.points, &ring.arcs));
         for pieces in holes.chain(rings) {
             let (cut, wall) = self.removed(&pieces);
             volume -= cut[0];
@@ -1061,8 +939,312 @@ impl Piece {
     }
 }
 
-fn triples() -> impl Iterator<Item = (usize, usize, usize)> {
-    (0..8).map(|i| (i >> 2, (i >> 1) & 1, i & 1))
+/// A face made later: its loop is built, its sense set from `out`, the way
+/// out of the material at `mid`.
+struct Wall {
+    key: String,
+    surface: SurfaceGeometry,
+    bounds: [[f64; 2]; 2],
+    uses: Vec<Use>,
+    mid: [f64; 2],
+    out: P3,
+}
+
+/// The sheet as the wrap rolls it: flat points onto either face, and the
+/// edges and walls of cuts through it.
+struct Rolled<'a> {
+    s: &'a Section,
+    wrap: Wrap,
+    z: [f64; 2],
+    lo: usize,
+    hi: usize,
+}
+
+impl Rolled<'_> {
+    fn new(s: &Section) -> Rolled<'_> {
+        let z = [s.level(0), s.level(1)];
+        let (lo, hi) = if z[0] < z[1] { (0, 1) } else { (1, 0) };
+        Rolled {
+            s,
+            wrap: s.wrap(),
+            z,
+            lo,
+            hi,
+        }
+    }
+
+    /// Flat point p on face oi.
+    fn at(&self, p: P2, oi: usize) -> P3 {
+        let q = self.s.to_wrap(p);
+        self.wrap.point([q[0], q[1], self.z[oi]])
+    }
+
+    /// A flat point's turn angle (from 0 to the sweep) and slant position.
+    fn place(&self, p: P2) -> (f64, f64) {
+        let q = self.s.to_wrap(p);
+        let n = self.wrap.point([q[0], q[1], self.wrap.radius]);
+        let b = self.s.sweep;
+        let mut theta = n[1].atan2(n[0]).rem_euclid(TAU);
+        if theta > (b + TAU) / 2.0 {
+            theta -= TAU;
+        }
+        let n0 = self.s.at(0.0, self.s.neutral);
+        let v = (n[0].hypot(n[1]) - n0[0]) * self.s.d[0] + (n[2] - n0[1]) * self.s.d[1];
+        (theta, v)
+    }
+
+    /// The way into the cut from flat point p along flat direction d, mid-sheet.
+    fn into(&self, p: P2, d: P2) -> P3 {
+        let mid = (self.z[0] + self.z[1]) / 2.0;
+        let h = 1e-6;
+        let (q, e) = (self.s.to_wrap(p), self.s.to_wrap_dir(d));
+        sub(
+            self.wrap.point([q[0] + h * e[0], q[1] + h * e[1], mid]),
+            self.wrap.point([q[0], q[1], mid]),
+        )
+    }
+
+    fn flat_frame(&self, c: P2, z: f64) -> Frame3 {
+        let (o, x, y) = (
+            self.s.to_wrap(c),
+            self.s.to_wrap_dir([1.0, 0.0]),
+            self.s.to_wrap_dir([0.0, 1.0]),
+        );
+        Frame3 {
+            origin: [o[0], o[1], z],
+            x: [x[0], x[1], 0.0],
+            y: [y[0], y[1], 0.0],
+            z: [0.0, 0.0, 1.0],
+        }
+    }
+
+    fn wrapped(&self, curve: CurveGeometry) -> CurveGeometry {
+        CurveGeometry::Wrapped {
+            wrap: self.wrap,
+            curve: Box::new(curve),
+        }
+    }
+
+    /// The straight edge through the sheet at flat point p.
+    fn vertical(&self, builder: &mut Builder, p: P2, seam: bool) -> Result<u32, GeometryError> {
+        let (a, c) = (self.at(p, self.lo), self.at(p, self.hi));
+        Ok(builder.edge(
+            CurveGeometry::Line {
+                origin: a,
+                direction: sub(c, a).map(|x| x / norm(sub(c, a))),
+            },
+            Interval::new(0.0, self.s.t)?,
+            seam,
+        ))
+    }
+
+    /// Edges on the sheet's faces take projected pcurves, which follow an
+    /// edge only while it strays less than a quarter turn from a straight
+    /// guess between its ends: how many pieces of at most a fifth of a half
+    /// turn around the axis the curve through `point` (on 0..1) needs.
+    fn pieces(&self, point: &dyn Fn(f64) -> P2) -> usize {
+        let turns: Vec<f64> = (0..=16)
+            .map(|i| self.s.developed(point(i as f64 / 16.0)).0)
+            .collect();
+        let (lo, hi) = turns
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), &t| (lo.min(t), hi.max(t)));
+        (((hi - lo) / (0.2 * PI)).ceil() as usize).max(1)
+    }
+
+    /// A cut's straight or arc segment from flat p to q, between vertices
+    /// `ends` and through-edges `verticals` there: its pieces in the edge's
+    /// direction, whether that runs p -> q, and its wall, the cut on the
+    /// `side` of p -> q (1 left, -1 right).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn segment(
+        &self,
+        builder: &mut Builder,
+        [p, q]: [P2; 2],
+        arc: Option<Arc>,
+        ends: [[u32; 2]; 2],
+        verticals: [u32; 2],
+        key: String,
+        side: f64,
+    ) -> Result<(Vec<Piece3>, bool, Wall), GeometryError> {
+        let (t, z, lo, hi) = (self.s.t, self.z, self.lo, self.hi);
+        // The edge's curve on each face, its parameter range, its flat point
+        // at a parameter, which of p and q it starts at, its wall's surface
+        // and the way into the cut at its middle.
+        let (curves, range, point, starts_at_p, surface, into, forward): (
+            [CurveGeometry; 2],
+            [f64; 2],
+            Box<dyn Fn(f64) -> P2>,
+            bool,
+            SurfaceGeometry,
+            P3,
+            bool,
+        ) = match arc {
+            None => {
+                let d = [q[0] - p[0], q[1] - p[1]];
+                let len = d[0].hypot(d[1]);
+                let u = [d[0] / len, d[1] / len];
+                let (o, uw) = (self.s.to_wrap(p), self.s.to_wrap_dir(u));
+                (
+                    [0, 1].map(|oi| {
+                        self.wrapped(CurveGeometry::Line {
+                            origin: [o[0], o[1], z[oi]],
+                            direction: [uw[0], uw[1], 0.0],
+                        })
+                    }),
+                    [0.0, len],
+                    Box::new(move |s| [p[0] + s * u[0], p[1] + s * u[1]]),
+                    true,
+                    SurfaceGeometry::Wrapped {
+                        wrap: self.wrap,
+                        surface: Box::new(SurfaceGeometry::Plane {
+                            frame: Frame3 {
+                                origin: [o[0], o[1], z[lo]],
+                                x: [uw[0], uw[1], 0.0],
+                                y: [0.0, 0.0, 1.0],
+                                z: [uw[1], -uw[0], 0.0],
+                            },
+                        }),
+                    },
+                    self.into(
+                        [p[0] + d[0] / 2.0, p[1] + d[1] / 2.0],
+                        [-u[1] * side, u[0] * side],
+                    ),
+                    true,
+                )
+            }
+            Some(arc) => {
+                let c = arc.center;
+                let r = (p[0] - c[0]).hypot(p[1] - c[1]);
+                let a_p = (p[1] - c[1]).atan2(p[0] - c[0]);
+                let sweep = arc.sweep(p, q);
+                // The edge runs with the angle.
+                let (a0, a1) = if sweep > 0.0 {
+                    (a_p, a_p + sweep)
+                } else {
+                    (a_p + sweep, a_p)
+                };
+                let (sm, cm) = ((a0 + a1) / 2.0).sin_cos();
+                // Left of p -> q there.
+                let left = if sweep > 0.0 { [-cm, -sm] } else { [cm, sm] };
+                (
+                    [0, 1].map(|oi| {
+                        self.wrapped(CurveGeometry::Circle {
+                            frame: self.flat_frame(c, z[oi]),
+                            radius: r,
+                        })
+                    }),
+                    [a0, a1],
+                    Box::new(move |a: f64| [c[0] + r * a.cos(), c[1] + r * a.sin()]),
+                    sweep > 0.0,
+                    SurfaceGeometry::Wrapped {
+                        wrap: self.wrap,
+                        surface: Box::new(SurfaceGeometry::Cylinder {
+                            frame: self.flat_frame(c, z[lo]),
+                            radius: r,
+                        }),
+                    },
+                    self.into(
+                        [c[0] + r * cm, c[1] + r * sm],
+                        [left[0] * side, left[1] * side],
+                    ),
+                    sweep > 0.0,
+                )
+            }
+        };
+        let (start, end, start_vertical, end_vertical) = if starts_at_p {
+            (ends[0], ends[1], verticals[0], verticals[1])
+        } else {
+            (ends[1], ends[0], verticals[1], verticals[0])
+        };
+        let [s0, s1] = range;
+        let param = |f: f64| s0 + f * (s1 - s0);
+        let m = self.pieces(&|f| point(param(f)));
+        let mut v = vec![start];
+        for piece in 1..m {
+            let x = point(param(piece as f64 / m as f64));
+            v.push([0, 1].map(|oi| builder.vertex(self.at(x, oi))));
+        }
+        v.push(end);
+        let mut list = Vec::with_capacity(m);
+        for piece in 0..m {
+            let span = Interval::new(
+                param(piece as f64 / m as f64),
+                param((piece + 1) as f64 / m as f64),
+            )?;
+            let edges = [0, 1].map(|oi| builder.edge(curves[oi].clone(), span, false));
+            let flat = [span.lo, span.hi].map(&point);
+            list.push((edges, v[piece], v[piece + 1], flat[0], flat[1]));
+        }
+        let mut uses: Vec<Use> = list
+            .iter()
+            .map(|&(e, a, b, _, _)| {
+                let line = uv_line([0.0, 0.0], [1.0, 0.0]);
+                boundary(e[lo], a[lo], b[lo], Orientation::Forward, line)
+            })
+            .collect();
+        uses.push(boundary(
+            end_vertical,
+            end[lo],
+            end[hi],
+            Orientation::Forward,
+            uv_line([s1, 0.0], [0.0, 1.0]),
+        ));
+        uses.extend(list.iter().rev().map(|&(e, a, b, _, _)| {
+            let line = uv_line([0.0, t], [1.0, 0.0]);
+            boundary(e[hi], b[hi], a[hi], Orientation::Reverse, line)
+        }));
+        uses.push(boundary(
+            start_vertical,
+            start[hi],
+            start[lo],
+            Orientation::Reverse,
+            uv_line([s0, 0.0], [0.0, 1.0]),
+        ));
+        let wall = Wall {
+            key,
+            surface,
+            bounds: [[s0, s1], [0.0, t]],
+            uses,
+            mid: [(s0 + s1) / 2.0, t / 2.0],
+            out: into,
+        };
+        Ok((list, forward, wall))
+    }
+}
+
+/// A closed path's segments for integration.
+fn pieces(points: &[P2], arcs: &[Option<Curve>]) -> Vec<Piece> {
+    let n = points.len();
+    (0..n)
+        .map(|k| {
+            let (p, q) = (points[k], points[(k + 1) % n]);
+            match arcs[k].and_then(Curve::arc) {
+                None => Piece::Line(p, q),
+                Some(arc) => {
+                    let c = arc.center;
+                    Piece::Arc(
+                        c,
+                        (p[0] - c[0]).hypot(p[1] - c[1]),
+                        (p[1] - c[1]).atan2(p[0] - c[0]),
+                        arc.sweep(p, q),
+                    )
+                }
+            }
+        })
+        .collect()
+}
+
+fn line(builder: &mut Builder, p: P3, q: P3) -> Result<u32, GeometryError> {
+    let length = norm(sub(q, p));
+    Ok(builder.edge(
+        CurveGeometry::Line {
+            origin: p,
+            direction: sub(q, p).map(|x| x / length),
+        },
+        Interval::new(0.0, length)?,
+        false,
+    ))
 }
 
 fn sub(a: P3, b: P3) -> P3 {
@@ -1362,6 +1544,72 @@ mod tests {
     }
 
     #[test]
+    fn notches_in_a_cones_edges_take_what_they_cut() {
+        use crate::spec::{Cutout, Hole};
+        for (radii, material) in [
+            ([50.0, 30.0], Radial::Outside),
+            ([30.0, 50.0], Radial::Inside),
+            ([50.0, 50.0], Radial::Outside),
+        ] {
+            let what = format!("{radii:?} {material:?}");
+            let mut spec = part(radii, 60.0, 180.0, material);
+            let plain = crate::fold::exact_mass(&spec).unwrap();
+            // A hole across the first side, a slot across the first arc.
+            spec.base.holes.push(Hole {
+                center: [3.0, 40.0],
+                diameter: 10.0,
+            });
+            spec.base.cutouts.push(Cutout {
+                outline: vec![[15.0, -6.0], [25.0, -6.0], [25.0, 4.0], [15.0, 4.0]],
+                bulges: vec![0.0, 0.0, 0.5, 0.0],
+            });
+            let f = crate::flat::flat_pattern(&spec).unwrap();
+            assert!(f.holes.is_empty() && f.cutouts.is_empty(), "{what}");
+            assert!(f.outline.len() > 4, "{what}");
+            let exact = crate::fold::exact_mass(&spec).unwrap();
+            assert!(exact.volume < plain.volume - 100.0, "{what}");
+            let mesh = crate::fold::mass(&crate::fold::fold(&spec).unwrap(), 1e-3).unwrap();
+            assert!(
+                ((mesh.volume - exact.volume) / exact.volume).abs() < 2e-5,
+                "{what}: mesh {} exact {}",
+                mesh.volume,
+                exact.volume
+            );
+            assert!(
+                ((mesh.area - exact.area) / exact.area).abs() < 2e-5,
+                "{what}: mesh {} exact {}",
+                mesh.area,
+                exact.area
+            );
+        }
+    }
+
+    /// The flat outline is the closed form's sheet: integrated over it, the
+    /// sheet measures as the closed form does.
+    #[test]
+    fn the_sheet_integrated_over_its_outline_is_the_closed_form() {
+        for (radii, material) in [
+            ([50.0, 30.0], Radial::Outside),
+            ([30.0, 50.0], Radial::Inside),
+            ([50.0, 50.0], Radial::Outside),
+        ] {
+            let spec = part(radii, 60.0, 270.0, material);
+            let Some(Ok(s)) = section(&spec) else {
+                panic!()
+            };
+            let f = s.pattern();
+            let (sheet, wall) = s.removed(&pieces(&f.outline, &f.outline_arcs));
+            let plain = s.plain_mass();
+            assert!((sheet[0] - plain.volume).abs() < 1e-9 * plain.volume);
+            assert!((sheet[1] + sheet[2] + wall - plain.area).abs() < 1e-9 * plain.area);
+            for j in 0..3 {
+                let c = sheet[3 + j] / sheet[0];
+                assert!((c - plain.center_of_mass[j]).abs() < 1e-8, "{radii:?} {j}");
+            }
+        }
+    }
+
+    #[test]
     fn what_a_cone_refuses() {
         let mut spec = part([50.0, 30.0], 60.0, 180.0, Radial::Inside);
         spec.base.cone.as_mut().unwrap().radii = [1.0, 30.0];
@@ -1375,18 +1623,9 @@ mod tests {
             Err(SheetError::Invalid(_))
         ));
         spec.base.cone.as_mut().unwrap().sweep = 90.0;
-        // A hole across the sheet's edge (a notch) isn't built yet.
-        spec.base.holes.push(crate::spec::Hole {
-            center: [10.0, 1.0],
-            diameter: 5.0,
-        });
-        assert!(matches!(
-            crate::fold::fold(&spec),
-            Err(SheetError::Unsupported(_))
-        ));
-        spec.base.holes.clear();
+        // A cut across the whole sheet would split it.
         spec.base.cutouts.push(crate::spec::Cutout {
-            outline: vec![[10.0, -2.0], [20.0, -2.0], [20.0, 5.0], [10.0, 5.0]],
+            outline: vec![[-5.0, 20.0], [200.0, 20.0], [200.0, 25.0], [-5.0, 25.0]],
             bulges: Vec::new(),
         });
         assert!(matches!(
