@@ -522,16 +522,20 @@ fn clips(
         }
         let mut path;
         if remnant - w <= relief.minimum_remnant + 1e-6 {
-            if relief.shape == ReliefShape::Round {
-                return Err(SheetError::Unsupported(format!(
-                    "{what}: a round relief next to a short remnant"
-                )));
-            }
             path = vec![
                 ([t + dir * big, big], None),
                 ([t + dir * big, e - d], None),
-                ([t, e - d], None),
             ];
+            if relief.shape == ReliefShape::Round {
+                // The bottom runs on; a quarter circle of half the width
+                // climbs from it to the strip's side, as next to a flange.
+                let (r, h) = (w / 2.0, w / 2.0 * std::f64::consts::FRAC_1_SQRT_2);
+                let via = [t + dir * (r - h), e - d + r - h];
+                path.push(([t + dir * r, e - d], Some(via)));
+                path.push(([t, e - d + r], None));
+            } else {
+                path.push(([t, e - d], None));
+            }
         } else if relief.shape == ReliefShape::Round {
             let mid = e - d + w / 2.0;
             path = vec![
@@ -1184,6 +1188,20 @@ mod tests {
                 "",
             )
         };
+        // A round relief 3 from the base's corner runs on past the remnant.
+        let mut round_remnant = part(
+            80.0,
+            &wall(70.0, "[[3, 10], [80, 10], [80, 50], [3, 50]]", "up"),
+            0,
+            "",
+        );
+        round_remnant.relief = Some(crate::spec::Relief {
+            shape: crate::spec::ReliefShape::Round,
+            width: 2.0,
+            depth: 1.5,
+            minimum_remnant: 4.0,
+            ..round_remnant.relief()
+        });
         let cases: Vec<(&str, PartSpec, f64, f64, f64, [f64; 3])> = vec![
             (
                 "l90",
@@ -1416,6 +1434,14 @@ mod tests {
                 33328.849013,
                 16078.760801,
                 [50.0, 44.9137, 10.3805],
+            ),
+            (
+                "round-remnant",
+                round_remnant,
+                21499.995514,
+                22426.269848,
+                10725.807494,
+                [47.8855, 46.9594, 9.6011],
             ),
         ];
         let mut bad = Vec::new();
