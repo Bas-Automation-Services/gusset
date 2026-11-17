@@ -7,7 +7,7 @@
 //! (cones, or cylinders), its short sides the ends (cones square to the
 //! sheet, or planes), and the two meridian planes close it.
 
-use crate::flat::{Arc, Cell, Curve, FlatPattern, FlatPunch, Layout, Ring, Zone, P2};
+use crate::flat::{Arc, Cell, Curve, FlatPattern, Layout, Zone, P2};
 use crate::fold::{accuracy, Mass, GAUSS, P3};
 use crate::spec::{Cone, PartSpec, Radial};
 use crate::SheetError;
@@ -185,34 +185,7 @@ impl Section {
     /// The flat pattern with its holes, cut-outs and punch stamps, which
     /// must lie inside the sheet, clear of its edges and each other.
     fn flat_pattern(&self, spec: &PartSpec) -> Result<FlatPattern, SheetError> {
-        let mut f = self.pattern();
-        let mut holes = spec.base.holes.clone();
-        let mut cutouts: Vec<Ring> = spec.base.cutouts.iter().map(Ring::from_cutout).collect();
-        for p in &spec.base.punches {
-            if p.at.is_empty() || p.holes.is_empty() && p.cutouts.is_empty() {
-                return Err(SheetError::Invalid(format!(
-                    "punch {}: needs a shape and a place",
-                    p.id
-                )));
-            }
-            for &at in &p.at {
-                let (h, k) = p.stamped(at);
-                holes.extend(h);
-                cutouts.extend(k.iter().map(Ring::from_cutout));
-                f.punches.push(FlatPunch {
-                    id: p.id.clone(),
-                    center: at,
-                    angle: p.angle,
-                });
-            }
-        }
-        // A hole across the sheet's edge is a round notch.
-        let (across, holes): (Vec<_>, Vec<_>) = holes
-            .into_iter()
-            .partition(|h| crate::cut::crosses_outline(&f, h));
-        cutouts.extend(across.iter().map(crate::cut::notch));
-        f.holes = holes.clone();
-        f.cutouts = cutouts;
+        let f = self.pattern();
         let mut layout = Layout {
             cells: vec![Cell {
                 name: "sheet".into(),
@@ -224,11 +197,10 @@ impl Section {
             }],
             flat: f,
             folds: Vec::new(),
-            holes: holes.clone(),
+            holes: Vec::new(),
             embosses: Vec::new(),
         };
-        crate::cut::cut_holes(&mut layout, &holes)?;
-        crate::cut::cut_cutouts(&mut layout)?;
+        crate::cut::cut_sheet(spec, &mut layout)?;
         Ok(layout.flat)
     }
 

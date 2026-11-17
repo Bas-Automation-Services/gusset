@@ -39,12 +39,6 @@ fn faceted(spec: &PartSpec) -> Option<Result<(Layout, Rigid), SheetError>> {
 
 fn build(spec: &PartSpec, cone: &Cone, facets: Facets) -> Result<(Layout, Rigid), SheetError> {
     crate::cone::check(spec, cone)?;
-    let b = &spec.base;
-    if !b.holes.is_empty() || !b.cutouts.is_empty() || !b.punches.is_empty() {
-        return Err(SheetError::Unsupported(
-            "holes, cut-outs and punches on a faceted cone".into(),
-        ));
-    }
     let (t, r, k) = (spec.thickness, spec.bend_radius, spec.k_factor);
     let [r0, r1] = cone.radii;
     let (h, sweep) = (cone.height, cone.sweep.to_radians());
@@ -256,6 +250,7 @@ fn build(spec: &PartSpec, cone: &Cone, facets: Facets) -> Result<(Layout, Rigid)
     crate::flat::simplify(&mut outline, &mut arcs, true);
     layout.flat.outline = outline;
     layout.flat.outline_arcs = arcs;
+    crate::cut::cut_sheet(spec, &mut layout)?;
     Ok((layout, place))
 }
 

@@ -3,11 +3,51 @@
 //! crosses loses the disc (its boundary follows the circle there, and it may
 //! split into pieces); a cell that holds it whole gets it as an inner loop.
 
-use crate::flat::{path_area, Arc, Cell, Curve, FlatPattern, Layout, Ring, P2};
-use crate::spec::Hole;
+use crate::flat::{path_area, Arc, Cell, Curve, FlatPattern, FlatPunch, Layout, Ring, P2};
+use crate::spec::{Hole, PartSpec};
 use crate::SheetError;
 
 const EPS: f64 = 1e-9;
+
+/// The base's holes, cut-outs and punch stamps cut into a sheet laid out
+/// without a base outline of its own (a cone); a hole across its edge is a
+/// round notch.
+pub(crate) fn cut_sheet(spec: &PartSpec, layout: &mut Layout) -> Result<(), SheetError> {
+    let mut holes = spec.base.holes.clone();
+    let mut cutouts: Vec<Ring> = spec.base.cutouts.iter().map(Ring::from_cutout).collect();
+    for p in &spec.base.punches {
+        if p.at.is_empty() || p.holes.is_empty() && p.cutouts.is_empty() {
+            return Err(SheetError::Invalid(format!(
+                "punch {}: needs a shape and a place",
+                p.id
+            )));
+        }
+        for &at in &p.at {
+            let (h, k) = p.stamped(at);
+            holes.extend(h);
+            cutouts.extend(k.iter().map(Ring::from_cutout));
+            layout.flat.punches.push(FlatPunch {
+                id: p.id.clone(),
+                center: at,
+                angle: p.angle,
+            });
+        }
+    }
+    let (across, holes): (Vec<_>, Vec<_>) = holes
+        .into_iter()
+        .partition(|h| crosses_outline(&layout.flat, h));
+    cutouts.extend(across.iter().map(notch));
+    layout.flat.holes = holes.clone();
+    layout.flat.cutouts = cutouts;
+    layout.holes = holes.clone();
+    cut_holes(layout, &holes)?;
+    cut_cutouts(layout)?;
+    // A round notch's two halves, one arc in the cells too.
+    for c in &mut layout.cells {
+        crate::flat::simplify(&mut c.polygon, &mut c.arcs, false);
+    }
+    Ok(())
+}
 
 pub(crate) fn cut_holes(layout: &mut Layout, holes: &[Hole]) -> Result<(), SheetError> {
     for (i, h) in holes.iter().enumerate() {

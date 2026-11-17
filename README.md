@@ -30,7 +30,8 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   on its neutral surface; holes, cut-outs and punches cut in the flat, also across its edges
   as notches and however far round the axis, their walls square to the rolled sheet.
   Or made on a press brake: planar facets joined by bends, as many as a chord tolerance,
-  facet angle or facet distance asks for, each bend's ends cut exactly where the arcs lie.
+  facet angle or facet distance asks for, each bend's ends cut exactly where the arcs lie;
+  holes, cut-outs and punches cut in the flat across facets and bends alike.
 - **Folds** along a line across the plate or a flange, nested, at any angle to the outline; **jogs**
   (Z-steps by an offset).
 - **Faces joined by bends:** plates on planes of their own, anywhere in 3D, each joined to the

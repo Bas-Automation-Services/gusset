@@ -5,7 +5,8 @@
 //!     cargo run --release --example fuzz -- <count> <seed>
 //!     SAFE=1 cargo run --release --example fuzz -- 1000 7   (fewer self-intersecting parts)
 //!     WHY=1 ...                                             (print each refusal and its part)
-//!     KIND=profile|fold|cone|facets|emboss|bend|placed ...  (profiles, fold lines, rolled and faceted cones, embosses,
+//!     KIND=profile|fold|cone|conecut|facets|facetcut|emboss|bend|placed ...  (profiles, fold lines, rolled and
+//!                                                           faceted cones, with cuts, embosses,
 //!                                                           faces joined by bends, embosses and punches
 //!                                                           on flanges)
 //!
@@ -365,10 +366,10 @@ fn corner_part(r: &mut Rng) -> String {
     )
 }
 
-/// A cone with holes and rounded cut-outs somewhere in its flat pattern's
-/// box (those off the sheet are refused).
-fn cut_cone_part(r: &mut Rng) -> String {
-    let json = cone_part(r);
+/// A cone, rolled or faceted, with holes and rounded cut-outs somewhere in
+/// its flat pattern's box (those off the sheet are refused).
+fn cut_cone_part(r: &mut Rng, faceted: bool) -> String {
+    let json = if faceted { faceted_part(r) } else { cone_part(r) };
     let plain: gusset_sheet::spec::PartSpec = serde_json::from_str(&json).unwrap();
     let Ok(flat) = gusset_sheet::flat::flat_pattern(&plain) else {
         return json;
@@ -745,7 +746,8 @@ fn main() {
             Ok("profile") => profile_part(&mut rng),
             Ok("fold") => folded_part(&mut rng),
             Ok("cone") => cone_part(&mut rng),
-            Ok("conecut") => cut_cone_part(&mut rng),
+            Ok("conecut") => cut_cone_part(&mut rng, false),
+            Ok("facetcut") => cut_cone_part(&mut rng, true),
             Ok("facets") => faceted_part(&mut rng),
             Ok("corner") => corner_part(&mut rng),
             Ok("emboss") => emboss_part(&mut rng),
@@ -758,7 +760,7 @@ fn main() {
             let flat = gusset_sheet::flat::flat_pattern(&part)?;
             let brep = gusset_sheet::fold::fold(&part)?;
             let exact = gusset_sheet::fold::exact_mass(&part)?;
-            if std::env::var("KIND").as_deref() == Ok("conecut") {
+            if matches!(std::env::var("KIND").as_deref(), Ok("conecut" | "facetcut")) {
                 // OpenGeometry's curved-trim mesh leaves slivers off a cut
                 // cone's faces: only that it meshes, and lost volume.
                 let mut plain = part.clone();
