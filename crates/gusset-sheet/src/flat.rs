@@ -532,7 +532,7 @@ fn lines_for_cuts(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Curve>>) {
 }
 
 /// x in rows of [a, b, c, d] with a x0 + b x1 + c x2 = d (Cramer).
-fn solve3(r: [[f64; 4]; 3]) -> [f64; 3] {
+pub(crate) fn solve3(r: [[f64; 4]; 3]) -> [f64; 3] {
     let det = |m: [[f64; 3]; 3]| {
         m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
             - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
@@ -620,7 +620,7 @@ pub fn flat_pattern(spec: &PartSpec) -> Result<FlatPattern, SheetError> {
 }
 
 pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
-    if let Some(l) = crate::cone::layout(spec) {
+    if let Some(l) = crate::cone::layout(spec).or_else(|| crate::facets::layout(spec)) {
         return l;
     }
     let spec = &*spec.resolved()?;
@@ -2874,7 +2874,7 @@ fn cross2(a: P2, b: P2) -> f64 {
 /// Drops points in the middle of a straight run (e.g. a base corner that a
 /// full-width flange strip continues past) or of one circle's arc (a round
 /// notch's two halves).
-fn simplify(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Curve>>, lines: bool) {
+pub(crate) fn simplify(pts: &mut Vec<P2>, arcs: &mut Vec<Option<Curve>>, lines: bool) {
     loop {
         let len = pts.len();
         let drop = (0..len).find(|&k| {

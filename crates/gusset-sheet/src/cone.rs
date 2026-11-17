@@ -1265,7 +1265,16 @@ fn cross(a: P3, b: P3) -> P3 {
 }
 
 fn section(spec: &PartSpec) -> Option<Result<Section, SheetError>> {
-    spec.base.cone.as_ref().map(|c| Section::new(spec, c))
+    spec.base
+        .cone
+        .as_ref()
+        .filter(|c| c.facets.is_none())
+        .map(|c| Section::new(spec, c))
+}
+
+/// Why a cone can't be built, if it can't.
+pub(crate) fn check(spec: &PartSpec, cone: &Cone) -> Result<(), SheetError> {
+    Section::new(spec, cone).map(|_| ())
 }
 
 /// The layout of a cone part: its flat pattern, nothing to fold.
@@ -1309,6 +1318,7 @@ mod tests {
             height,
             sweep,
             material,
+            facets: None,
         });
         spec
     }

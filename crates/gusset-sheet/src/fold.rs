@@ -37,12 +37,16 @@ impl From<GeometryError> for SheetError {
 }
 
 pub fn fold(spec: &PartSpec) -> Result<BrepEnvelope, SheetError> {
-    if let Some(solid) = crate::cone::fold(spec) {
+    if let Some(solid) = crate::cone::fold(spec).or_else(|| crate::facets::fold(spec)) {
         return solid;
     }
     let spec = &*spec.resolved()?;
     let layout = layout(spec)?;
-    let model = Model::new(spec, &layout);
+    solid(&Model::new(spec, &layout))
+}
+
+/// The folded part, or why it isn't one.
+pub(crate) fn solid(model: &Model) -> Result<BrepEnvelope, SheetError> {
     model.refuse_clashes()?;
     model.build().map_err(|e| match e {
         // What the kernel sees when features fold into each other.
@@ -138,6 +142,13 @@ impl Rigid {
             t: sub(c, rigid.rot(c)),
         }
     }
+    /// The map taking x, y, z to origin + x X + y Y + z Z.
+    pub(crate) fn frame(origin: P3, x: P3, y: P3, z: P3) -> Rigid {
+        Rigid {
+            r: std::array::from_fn(|i| [x[i], y[i], z[i]]),
+            t: origin,
+        }
+    }
     fn shift(d: P3) -> Rigid {
         Rigid {
             t: d,
@@ -164,10 +175,17 @@ pub(crate) struct Model<'a> {
     r: f64,
     pub(crate) layout: &'a Layout,
     pub(crate) folds: Vec<FoldMap>,
+    /// Where the base's flat frame lies.
+    place: Rigid,
 }
 
 impl<'a> Model<'a> {
     pub(crate) fn new(spec: &PartSpec, layout: &'a Layout) -> Self {
+        Self::placed(spec, layout, Rigid::IDENTITY)
+    }
+
+    /// With the base's flat frame at `place`.
+    pub(crate) fn placed(spec: &PartSpec, layout: &'a Layout, place: Rigid) -> Self {
         let t = spec.thickness;
         // Largest bend radius, for padding UV bounds.
         let r = layout
@@ -177,7 +195,7 @@ impl<'a> Model<'a> {
             .fold(spec.bend_radius, f64::max);
         let mut folds: Vec<FoldMap> = Vec::new();
         for f in &layout.folds {
-            let parent = f.parent.map_or(Rigid::IDENTITY, |p| folds[p].child);
+            let parent = f.parent.map_or(place, |p| folds[p].child);
             let sigma = if f.up { 1.0 } else { -1.0 };
             let zc = if f.up { t + f.radius } else { -f.radius };
             let axis = [
@@ -207,6 +225,7 @@ impl<'a> Model<'a> {
             r,
             layout,
             folds,
+            place,
         }
     }
 
@@ -244,7 +263,7 @@ impl<'a> Model<'a> {
 
     pub(crate) fn map(&self, zone: Zone, p: P2, z: f64) -> P3 {
         match zone {
-            Zone::Base => [p[0], p[1], z],
+            Zone::Base => self.place.apply([p[0], p[1], z]),
             Zone::Flange(i) => self.folds[i].child.apply([p[0], p[1], z]),
             Zone::Bend(i) => {
                 let f = &self.folds[i];
@@ -305,7 +324,7 @@ impl<'a> Model<'a> {
     /// The rotation part of a flat zone's map.
     fn rigid(&self, zone: Zone) -> Rigid {
         match zone {
-            Zone::Base => Rigid::IDENTITY,
+            Zone::Base => self.place,
             Zone::Flange(i) => self.folds[i].child,
             Zone::Bend(i) => self.folds[i].parent,
         }
@@ -565,7 +584,8 @@ impl<'a> Model<'a> {
                     let (ellipse, phase) = conoid_ellipse(frame, c3, rho)?;
                     let id = b.edge(
                         ellipse,
-                        Interval::new(lo_phi - phase, hi_phi - phase).map_err(GeometryError::from)?,
+                        Interval::new(lo_phi - phase, hi_phi - phase)
+                            .map_err(GeometryError::from)?,
                         false,
                     );
                     edges.insert(
@@ -1507,7 +1527,7 @@ fn unit2(a: P2) -> P2 {
 /// Gauss-Legendre quadrature on pieces short enough to be exact to rounding).
 /// No mesh: use this where `mass` would need a very fine tessellation.
 pub fn exact_mass(spec: &PartSpec) -> Result<Mass, SheetError> {
-    if let Some(m) = crate::cone::mass(spec) {
+    if let Some(m) = crate::cone::mass(spec).or_else(|| crate::facets::mass(spec)) {
         return m;
     }
     let spec = &*spec.resolved()?;
@@ -1572,7 +1592,10 @@ impl Piece {
                 let dt = (-c.c[1] * sn + c.c[2] * cs) / c.radius;
                 (
                     c.point(x),
-                    [(c.u[0] * dt + c.n[0]) * (b - a), (c.u[1] * dt + c.n[1]) * (b - a)],
+                    [
+                        (c.u[0] * dt + c.n[0]) * (b - a),
+                        (c.u[1] * dt + c.n[1]) * (b - a),
+                    ],
                 )
             }
         }
@@ -1616,7 +1639,7 @@ fn piece_key(piece: &Piece) -> PieceKey {
 }
 
 impl Model<'_> {
-    fn exact_mass(&self) -> Mass {
+    pub(crate) fn exact_mass(&self) -> Mass {
         let t = self.t;
         // Every boundary piece with its cell and kind: 0 an edge (a wall unless
         // two cells share it), 1 a hole held whole (a wall), 2 an emboss's
@@ -3569,7 +3592,10 @@ mod notch_hole_tests {
         let (brep, e) = (fold(&spec).unwrap(), exact_mass(&spec).unwrap());
         for tolerance in [0.02, 0.002] {
             let m = mass(&brep, tolerance).unwrap();
-            assert!(((m.volume - e.volume) / e.volume).abs() < 1e-3, "{tolerance}");
+            assert!(
+                ((m.volume - e.volume) / e.volume).abs() < 1e-3,
+                "{tolerance}"
+            );
         }
     }
 }

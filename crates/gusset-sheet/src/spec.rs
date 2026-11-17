@@ -825,6 +825,39 @@ pub struct Cone {
     /// The side of the arcs' face the material lies on: away from the axis
     /// or towards it.
     pub material: Radial,
+    /// Made on a press brake instead of rolled: planar facets, their corners
+    /// at equal angles on both arcs (the arcs' face is the polygon), joined
+    /// by bends with the part's radius. Each bend ends where its face on the
+    /// arcs' side meets z = 0 or z = height, cut square to its axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Facets>,
+}
+
+/// How many facets a press-brake cone gets: the fewest at which every facet
+/// keeps within the limit, measured on the larger arc.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Facets {
+    /// The most a facet's chord lies off its arc (mm).
+    ChordTolerance(f64),
+    /// The most a facet turns from the arc at its corners (degrees): half
+    /// the angle it spans.
+    FacetAngle(f64),
+    /// The longest a facet's chord is (mm).
+    FacetDistance(f64),
+}
+
+impl Facets {
+    /// The number of facets over `sweep` (radians) on an arc of `radius`.
+    pub fn count(self, sweep: f64, radius: f64) -> Option<usize> {
+        let span = match self {
+            Facets::ChordTolerance(c) if c > 0.0 => 2.0 * (1.0 - c / radius).max(-1.0).acos(),
+            Facets::FacetAngle(a) if a > 0.0 => 2.0 * a.to_radians(),
+            Facets::FacetDistance(d) if d > 0.0 => 2.0 * (d / (2.0 * radius)).min(1.0).asin(),
+            _ => return None,
+        };
+        Some(((sweep / span - 1e-9).ceil() as usize).max(1))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -3,9 +3,10 @@
 pub mod check;
 pub mod clash;
 mod cone;
+mod cut;
 mod emboss;
 mod faces;
-mod cut;
+mod facets;
 pub mod flat;
 pub mod fold;
 mod foldline;

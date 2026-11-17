@@ -347,6 +347,17 @@
       "description": "A part rolled to a cone or cylinder segment around the z axis: the sheet\nbetween two coaxial arcs, one on z = 0 and one on z = height, both from +x\ncounter-clockwise by `sweep` (a lofted flange between two such arcs, or a\nstraight line rolled around an axis). The arcs lie on one face of the\nsheet; the sheet's ends are cut square to it, so an end of a cone is a\ncone too. The flat pattern is the developed neutral surface (at the\nK-factor): the edge from the arcs' start points runs from (0, 0) to (0, L),\nL the slant length, and the sheet unrolls towards +x, seen from outside.\nHoles, cut-outs and punches go in the flat pattern, inside the sheet (not\nacross its edges): rolled up, their walls stand square to the sheet.\nOther features on it aren't supported yet.",
       "type": "object",
       "properties": {
+        "facets": {
+          "description": "Made on a press brake instead of rolled: planar facets, their corners\nat equal angles on both arcs (the arcs' face is the polygon), joined\nby bends with the part's radius. Each bend ends where its face on the\narcs' side meets z = 0 or z = height, cut square to its axis.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Facets"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "height": {
           "type": "number",
           "format": "double"
@@ -939,6 +950,53 @@
       "required": [
         "face",
         "edge"
+      ]
+    },
+    "Facets": {
+      "description": "How many facets a press-brake cone gets: the fewest at which every facet\nkeeps within the limit, measured on the larger arc.",
+      "oneOf": [
+        {
+          "description": "The most a facet's chord lies off its arc (mm).",
+          "type": "object",
+          "properties": {
+            "chord_tolerance": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "chord_tolerance"
+          ]
+        },
+        {
+          "description": "The most a facet turns from the arc at its corners (degrees): half\nthe angle it spans.",
+          "type": "object",
+          "properties": {
+            "facet_angle": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "facet_angle"
+          ]
+        },
+        {
+          "description": "The longest a facet's chord is (mm).",
+          "type": "object",
+          "properties": {
+            "facet_distance": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "facet_distance"
+          ]
+        }
       ]
     },
     "FixedEdge": {

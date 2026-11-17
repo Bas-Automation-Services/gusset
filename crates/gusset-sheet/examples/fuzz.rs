@@ -5,7 +5,7 @@
 //!     cargo run --release --example fuzz -- <count> <seed>
 //!     SAFE=1 cargo run --release --example fuzz -- 1000 7   (fewer self-intersecting parts)
 //!     WHY=1 ...                                             (print each refusal and its part)
-//!     KIND=profile|fold|cone|emboss|bend|placed ...         (profiles, fold lines, rolled cones, embosses,
+//!     KIND=profile|fold|cone|facets|emboss|bend|placed ...  (profiles, fold lines, rolled and faceted cones, embosses,
 //!                                                           faces joined by bends, embosses and punches
 //!                                                           on flanges)
 //!
@@ -308,6 +308,21 @@ fn cone_part(r: &mut Rng) -> String {
         },
         r.range(1.0, 359.0),
         r.pick(&["outside", "inside"]),
+    )
+}
+
+/// A cone made on a press brake: facets by any of the three limits.
+fn faceted_part(r: &mut Rng) -> String {
+    let cone = cone_part(r);
+    let facets = match r.pick(&["chord", "angle", "distance"]) {
+        "chord" => format!(r#"{{"chord_tolerance": {}}}"#, r.range(0.1, 10.0)),
+        "angle" => format!(r#"{{"facet_angle": {}}}"#, r.range(2.0, 60.0)),
+        _ => format!(r#"{{"facet_distance": {}}}"#, r.range(3.0, 80.0)),
+    };
+    cone.replacen(
+        r#""material""#,
+        &format!(r#""facets": {facets}, "material""#),
+        1,
     )
 }
 
@@ -731,6 +746,7 @@ fn main() {
             Ok("fold") => folded_part(&mut rng),
             Ok("cone") => cone_part(&mut rng),
             Ok("conecut") => cut_cone_part(&mut rng),
+            Ok("facets") => faceted_part(&mut rng),
             Ok("corner") => corner_part(&mut rng),
             Ok("emboss") => emboss_part(&mut rng),
             Ok("bend") => bend_part(&mut rng),
