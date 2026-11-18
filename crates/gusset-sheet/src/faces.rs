@@ -19,9 +19,9 @@ const EPS: f64 = 1e-6;
 /// The spec with its faces unrolled onto the base and its bends as fold
 /// lines (before the part's own folds), every face edge as a base edge.
 pub(crate) fn without_faces(spec: &PartSpec) -> Result<PartSpec, SheetError> {
-    if spec.base.profile.is_some() || spec.base.cone.is_some() {
+    if spec.base.profile.is_some() || spec.base.cone.is_some() || spec.base.loft.is_some() {
         return Err(SheetError::Unsupported(
-            "faces and bends on a profile or cone part".into(),
+            "faces and bends on a profile, cone or loft part".into(),
         ));
     }
     let base_ring = Ring::from_cutout(&Cutout {
@@ -522,10 +522,7 @@ fn clips(
         }
         let mut path;
         if remnant - w <= relief.minimum_remnant + 1e-6 {
-            path = vec![
-                ([t + dir * big, big], None),
-                ([t + dir * big, e - d], None),
-            ];
+            path = vec![([t + dir * big, big], None), ([t + dir * big, e - d], None)];
             if relief.shape == ReliefShape::Round {
                 // The bottom runs on; a quarter circle of half the width
                 // climbs from it to the strip's side, as next to a flange.

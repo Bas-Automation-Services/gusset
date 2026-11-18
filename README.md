@@ -32,6 +32,10 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   Or made on a press brake: planar facets joined by bends, as many as a chord tolerance,
   facet angle or facet distance asks for, each bend's ends cut exactly where the arcs lie;
   holes, cut-outs and punches cut in the flat across facets and bends alike.
+- **Lofts** between two open polylines (a rectangle to a smaller or shifted one, an open U, any
+  convex polygon open at a gap), made on a press brake: a planar facet between each pair of
+  matching segments, joined by bends along the lines between matching corners, each bend's
+  ends cut exactly where the polylines lie; holes, cut-outs and punches in the flat.
 - **Folds** along a line across the plate or a flange, nested, at any angle to the outline; **jogs**
   (Z-steps by an offset).
 - **Faces joined by bends:** plates on planes of their own, anywhere in 3D, each joined to the

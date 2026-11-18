@@ -45,8 +45,8 @@ impl Section {
     fn new(spec: &PartSpec, cone: &Cone) -> Result<Section, SheetError> {
         let invalid = |what: &str| Err(SheetError::Invalid(format!("cone: {what}")));
         let b = &spec.base;
-        if !b.outline.is_empty() || b.profile.is_some() {
-            return invalid("a base has an outline, a profile or a cone, one of them");
+        if !b.outline.is_empty() || b.profile.is_some() || b.loft.is_some() {
+            return invalid("a base has an outline, a profile, a cone or a loft, one of them");
         }
         let [r0, r1] = cone.radii;
         if !(r0 > 0.0 && r1 > 0.0 && cone.height > 0.0) {
@@ -55,23 +55,7 @@ impl Section {
         if !(cone.sweep > 0.0 && cone.sweep < 360.0) {
             return invalid("the sweep must lie between 0 and 360 degrees");
         }
-        let features = [
-            (!spec.flanges.is_empty(), "flanges"),
-            (!spec.contours.is_empty(), "contour flanges"),
-            (!spec.hems.is_empty(), "hems"),
-            (!spec.folds.is_empty(), "folds"),
-            (!spec.jogs.is_empty(), "jogs"),
-            (!spec.face_cuts.is_empty(), "face cuts"),
-            (
-                b.punches.iter().any(|p| p.on.is_some()),
-                "a punch on a face",
-            ),
-            (!b.embosses.is_empty(), "embosses"),
-            (spec.bend_table.is_some(), "a bend table"),
-        ];
-        if let Some((_, what)) = features.iter().find(|f| f.0) {
-            return Err(SheetError::Unsupported(format!("{what} on a cone")));
-        }
+        bare(spec, "cone")?;
         let t = spec.thickness;
         let (dr, h) = (r1 - r0, cone.height);
         let l = dr.hypot(h);
@@ -1245,6 +1229,30 @@ fn section(spec: &PartSpec) -> Option<Result<Section, SheetError>> {
 }
 
 /// Why a cone can't be built, if it can't.
+/// A cone or loft carries holes, cut-outs and punches in its flat pattern,
+/// no other features.
+pub(crate) fn bare(spec: &PartSpec, what: &str) -> Result<(), SheetError> {
+    let b = &spec.base;
+    let features = [
+        (!spec.flanges.is_empty(), "flanges"),
+        (!spec.contours.is_empty(), "contour flanges"),
+        (!spec.hems.is_empty(), "hems"),
+        (!spec.folds.is_empty(), "folds"),
+        (!spec.jogs.is_empty(), "jogs"),
+        (!spec.face_cuts.is_empty(), "face cuts"),
+        (
+            b.punches.iter().any(|p| p.on.is_some()),
+            "a punch on a face",
+        ),
+        (!b.embosses.is_empty(), "embosses"),
+        (spec.bend_table.is_some(), "a bend table"),
+    ];
+    match features.iter().find(|f| f.0) {
+        Some((_, feature)) => Err(SheetError::Unsupported(format!("{feature} on a {what}"))),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn check(spec: &PartSpec, cone: &Cone) -> Result<(), SheetError> {
     Section::new(spec, cone).map(|_| ())
 }

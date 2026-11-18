@@ -564,6 +564,10 @@ pub struct Base {
     /// In place of an outline: the part is a rolled cone or cylinder segment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cone: Option<Cone>,
+    /// In place of an outline: the part is lofted between two polylines,
+    /// made on a press brake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loft: Option<Loft>,
     /// Holes in the flat pattern (the base frame, which the flat pattern
     /// shares): on the base, across or inside a bend, or on a flange. Each
     /// must lie inside the flat outline or cross it (a round notch), without
@@ -858,6 +862,25 @@ impl Facets {
         };
         Some(((sweep / span - 1e-9).ceil() as usize).max(1))
     }
+}
+
+/// A sheet lofted between two open polylines, `bottom` on z = 0 and `top`
+/// on z = height, made on a press brake: a planar facet between each pair of
+/// matching segments (they must run the same way), joined by bends with the
+/// part's radius along the lines between matching corners. Both turn left
+/// at every corner (counter-clockwise seen from +z), so a closed shape runs
+/// round with a gap. The polylines' face is the polygon. Each bend ends where its face on the
+/// polylines' side meets z = 0 or z = height, cut square to its axis.
+/// Holes, cut-outs and punches lie in its flat pattern, as on a cone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Loft {
+    pub bottom: Vec<[f64; 2]>,
+    pub top: Vec<[f64; 2]>,
+    pub height: f64,
+    /// The side of the polylines' face the material lies on: outside the
+    /// shape they turn round (to the right of the way they run), or inside.
+    pub material: Radial,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

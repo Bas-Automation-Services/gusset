@@ -169,6 +169,17 @@
             "$ref": "#/$defs/Hole"
           }
         },
+        "loft": {
+          "description": "In place of an outline: the part is lofted between two polylines,\nmade on a press brake.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Loft"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "outline": {
           "description": "Counter-clockwise polygon seen from +z. Edge `i` runs from\n`outline[i]` to `outline[i + 1]` (wrapping). Empty for a profile.",
           "type": "array",
@@ -1408,6 +1419,51 @@
         "line",
         "offset",
         "side"
+      ]
+    },
+    "Loft": {
+      "description": "A sheet lofted between two open polylines, `bottom` on z = 0 and `top`\non z = height, made on a press brake: a planar facet between each pair of\nmatching segments (they must run the same way), joined by bends with the\npart's radius along the lines between matching corners. Both turn left\nat every corner (counter-clockwise seen from +z), so a closed shape runs\nround with a gap. The polylines' face is the polygon. Each bend ends where its face on the\npolylines' side meets z = 0 or z = height, cut square to its axis.\nHoles, cut-outs and punches lie in its flat pattern, as on a cone.",
+      "type": "object",
+      "properties": {
+        "bottom": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "height": {
+          "type": "number",
+          "format": "double"
+        },
+        "material": {
+          "description": "The side of the polylines' face the material lies on: outside the\nshape they turn round (to the right of the way they run), or inside.",
+          "$ref": "#/$defs/Radial"
+        },
+        "top": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "bottom",
+        "top",
+        "height",
+        "material"
       ]
     },
     "Profile": {

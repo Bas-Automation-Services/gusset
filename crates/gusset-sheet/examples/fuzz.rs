@@ -5,8 +5,8 @@
 //!     cargo run --release --example fuzz -- <count> <seed>
 //!     SAFE=1 cargo run --release --example fuzz -- 1000 7   (fewer self-intersecting parts)
 //!     WHY=1 ...                                             (print each refusal and its part)
-//!     KIND=profile|fold|cone|conecut|facets|facetcut|emboss|bend|placed ...  (profiles, fold lines, rolled and
-//!                                                           faceted cones, with cuts, embosses,
+//!     KIND=profile|fold|cone|conecut|facets|facetcut|loft|loftcut|emboss|bend|placed ...  (profiles, fold
+//!                                                           lines, rolled and faceted cones and lofts, with cuts, embosses,
 //!                                                           faces joined by bends, embosses and punches
 //!                                                           on flanges)
 //!
@@ -327,6 +327,52 @@ fn faceted_part(r: &mut Rng) -> String {
     )
 }
 
+/// A press-brake loft: a convex polygon's corners on an ellipse, round all
+/// of it from the middle of a side (a gap there) or along a run of corners;
+/// the top the same scaled and moved.
+fn loft_part(r: &mut Rng) -> String {
+    let t = [1.0, 1.5, 2.0, 3.0][(r.next() * 4.0) as usize % 4];
+    let n = 3 + (r.next() * 6.0) as usize;
+    let (a, b) = (r.range(10.0, 120.0), r.range(10.0, 120.0));
+    let mut turns: Vec<f64> = (0..n)
+        .map(|_| r.range(0.0, std::f64::consts::TAU))
+        .collect();
+    turns.sort_by(f64::total_cmp);
+    let pts: Vec<[f64; 2]> = turns.iter().map(|w| [a * w.cos(), b * w.sin()]).collect();
+    let bottom = if r.chance(0.6) {
+        let (p, q) = (pts[n - 1], pts[0]);
+        let gap = r.range(0.01, 0.4);
+        let at = |f: f64| [p[0] + f * (q[0] - p[0]), p[1] + f * (q[1] - p[1])];
+        let mut line = vec![at(0.5 + gap / 2.0)];
+        line.extend_from_slice(&pts);
+        line.push(at(0.5 - gap / 2.0));
+        line
+    } else {
+        pts[..2 + (r.next() * (n - 1) as f64) as usize].to_vec()
+    };
+    let (k, dx, dy) = (
+        r.range(0.2, 1.6),
+        r.range(-40.0, 40.0),
+        r.range(-40.0, 40.0),
+    );
+    let top: Vec<[f64; 2]> = bottom
+        .iter()
+        .map(|p| [k * p[0] + dx, k * p[1] + dy])
+        .collect();
+    format!(
+        r#"{{"id": "loft", "thickness": {t}, "bend_radius": {}, "k_factor": {},
+            "base": {{"loft": {{"bottom": {bottom:?}, "top": {top:?}, "height": {}, "material": "{}"}}}}}}"#,
+        r.range(0.5, 6.0),
+        r.range(0.25, 0.5),
+        if r.chance(0.1) {
+            r.range(0.5, 3.0)
+        } else {
+            r.range(3.0, 200.0)
+        },
+        r.pick(&["outside", "inside"]),
+    )
+}
+
 /// Two partial flanges ending close to one corner of a plate (short
 /// remnants on one or both sides), with any relief.
 fn corner_part(r: &mut Rng) -> String {
@@ -339,7 +385,11 @@ fn corner_part(r: &mut Rng) -> String {
         format!(
             r#"{{"id": "{id}", "on": {{"base": {edge}}}, "width": {{"offset_start": {start}, "offset_end": {end}}},
                "angle": {}, "length": {}, "datum": "outer", "position": "{}", "side": "{}"}}"#,
-            if r.chance(0.6) { 90.0 } else { r.range(30.0, 150.0) },
+            if r.chance(0.6) {
+                90.0
+            } else {
+                r.range(30.0, 150.0)
+            },
             r.range(8.0, 30.0),
             r.pick(&["outside", "outside", "inside"]),
             r.pick(&["up", "up", "down"])
@@ -366,10 +416,10 @@ fn corner_part(r: &mut Rng) -> String {
     )
 }
 
-/// A cone, rolled or faceted, with holes and rounded cut-outs somewhere in
-/// its flat pattern's box (those off the sheet are refused).
-fn cut_cone_part(r: &mut Rng, faceted: bool) -> String {
-    let json = if faceted { faceted_part(r) } else { cone_part(r) };
+/// A cone or loft with holes and rounded cut-outs somewhere in its flat
+/// pattern's box (those off the sheet are refused).
+fn cut_sheet_part(r: &mut Rng, sheet: fn(&mut Rng) -> String) -> String {
+    let json = sheet(r);
     let plain: gusset_sheet::spec::PartSpec = serde_json::from_str(&json).unwrap();
     let Ok(flat) = gusset_sheet::flat::flat_pattern(&plain) else {
         return json;
@@ -380,7 +430,12 @@ fn cut_cone_part(r: &mut Rng, faceted: bool) -> String {
     let holes: Vec<String> = (0..1 + (r.next() * 4.0) as usize)
         .map(|_| {
             let c = at(r);
-            format!(r#"{{"center": [{}, {}], "diameter": {}}}"#, c[0], c[1], r.range(0.1, 1.0) * size)
+            format!(
+                r#"{{"center": [{}, {}], "diameter": {}}}"#,
+                c[0],
+                c[1],
+                r.range(0.1, 1.0) * size
+            )
         })
         .collect();
     let cutouts: Vec<String> = (0..(r.next() * 3.0) as usize)
@@ -746,8 +801,10 @@ fn main() {
             Ok("profile") => profile_part(&mut rng),
             Ok("fold") => folded_part(&mut rng),
             Ok("cone") => cone_part(&mut rng),
-            Ok("conecut") => cut_cone_part(&mut rng, false),
-            Ok("facetcut") => cut_cone_part(&mut rng, true),
+            Ok("conecut") => cut_sheet_part(&mut rng, cone_part),
+            Ok("facetcut") => cut_sheet_part(&mut rng, faceted_part),
+            Ok("loft") => loft_part(&mut rng),
+            Ok("loftcut") => cut_sheet_part(&mut rng, loft_part),
             Ok("facets") => faceted_part(&mut rng),
             Ok("corner") => corner_part(&mut rng),
             Ok("emboss") => emboss_part(&mut rng),
@@ -760,7 +817,10 @@ fn main() {
             let flat = gusset_sheet::flat::flat_pattern(&part)?;
             let brep = gusset_sheet::fold::fold(&part)?;
             let exact = gusset_sheet::fold::exact_mass(&part)?;
-            if matches!(std::env::var("KIND").as_deref(), Ok("conecut" | "facetcut")) {
+            if matches!(
+                std::env::var("KIND").as_deref(),
+                Ok("conecut" | "facetcut" | "loftcut")
+            ) {
                 // OpenGeometry's curved-trim mesh leaves slivers off a cut
                 // cone's faces: only that it meshes, and lost volume.
                 let mut plain = part.clone();
