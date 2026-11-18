@@ -583,8 +583,8 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opengeometry"
-version = "3.0.0"
-source = "git+https://github.com/Bas-Automation-Services/OpenGeometry?branch=integration%2F3.0#6d173a0df7d2917be9b70c7ccf0ba4c01b68daf1"
+version = "3.0.1"
+source = "git+https://github.com/Bas-Automation-Services/OpenGeometry?branch=integration%2F3.0#a4e4c5a91fc0f61ad47064ec8c8e24f6ff335e77"
 dependencies = [
  "console_error_panic_hook",
  "earcutr",
