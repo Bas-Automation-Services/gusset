@@ -9,9 +9,9 @@ use crate::flat::{layout, Curve, Cut, Fold, Layout, Zone, P2};
 use crate::spec::PartSpec;
 use crate::SheetError;
 use opengeometry::brep::{
-    boundary, conoid_ellipse, plane_boundary, projected_boundary, uv_line, Accuracy, BrepEnvelope,
-    Builder, CurveGeometry, Frame3, GeometryError, Orientation, PcurveGeometry, SurfaceGeometry,
-    Use, Wrap,
+    boundary, conoid_ellipse, plane_boundary, projected_boundary, uv_conic, uv_line, Accuracy,
+    BrepEnvelope, Builder, CurveGeometry, Frame3, GeometryError, Orientation, SurfaceGeometry, Use,
+    Wrap,
 };
 use opengeometry::math::Interval;
 use opengeometry::tessellation::tessellate;
@@ -1347,11 +1347,7 @@ impl<'a> Model<'a> {
                 let pcurve = match e.kind {
                     Kind::Arc { v } => uv_line([0.0, v], [1.0, 0.0]),
                     Kind::Helix { origin, direction } => uv_line(origin, direction),
-                    Kind::Conic { origin, a, b } => PcurveGeometry::Conic2 {
-                        origin,
-                        axis_a: a,
-                        axis_b: b,
-                    },
+                    Kind::Conic { origin, a, b } => uv_conic(origin, a, b),
                     Kind::Axial { phi, direction } => {
                         // A line along the axis at bend angle phi (taken from the
                         // flat, so angles past 180 degrees don't wrap).
