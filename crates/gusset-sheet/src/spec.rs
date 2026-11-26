@@ -447,8 +447,9 @@ pub enum Seam {
 #[serde(deny_unknown_fields)]
 pub struct CornerRelief {
     pub shape: CornerShape,
-    /// Diameter (round) or side (square). Default 4T. Larger than the
-    /// diagonal of where the bends overlap, centred where the bend centre
+    /// Diameter (round), side (square) or width (obround). Default 4T. A
+    /// round or square one larger than the
+    /// diagonal of where the bends overlap is centred where the bend centre
     /// lines cross. Smaller, on the bisector through q (where the bend start
     /// lines cross): its inscribed circle through q, until its corner reaches
     /// the circle through q and both flanges' first corners, then at that
@@ -456,6 +457,10 @@ pub struct CornerRelief {
     /// pattern only (folded, the corner is trimmed to bend).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f64>,
+    /// An obround's length, end to end, more than its width. Default twice
+    /// its width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -476,6 +481,11 @@ pub enum CornerShape {
     /// As the linear weld in 3D; the flat shows the corner closed, its flange
     /// edges meeting (torn when folded).
     Tear,
+    /// A slot with round ends, `size` wide and `length` long, on the
+    /// bisector, centred where the bend centre lines cross. Each bend runs on
+    /// to its flange's end (no trim to bend); the slot must take where they
+    /// overlap. Bends of one bend allowance only.
+    Obround,
 }
 
 /// The notch's end, past the start of the bend.

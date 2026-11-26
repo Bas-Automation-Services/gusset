@@ -1368,7 +1368,10 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             let mut run_on = RunOn::No;
             let mut turn = (q, q, q);
             let mut shape = shape;
-            if matches!(shape, CornerShape::Round | CornerShape::Square) {
+            if matches!(
+                shape,
+                CornerShape::Round | CornerShape::Square | CornerShape::Obround
+            ) {
                 let size = relief
                     .corner
                     .and_then(|c| c.size)
@@ -1421,7 +1424,61 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     .iter()
                     .map(|&p| dist(p, crossing))
                     .fold(0.0, f64::max);
-                let clip = if let Some(kept) = short {
+                let clip = if shape == CornerShape::Obround {
+                    // A slot on the bisector, centred where the bend centre
+                    // lines cross; each bend runs on to its flange's end
+                    // line, and the slot takes where the two overlap.
+                    if short.is_some() || (ba - bb).abs() > EPS {
+                        return unsupported(
+                            "an obround corner relief where the flange starts short of its bend or between bends of different allowances",
+                        );
+                    }
+                    let length = relief.corner.and_then(|c| c.length).unwrap_or(2.0 * size);
+                    if length <= size + EPS {
+                        return Err(SheetError::Invalid(format!(
+                            "an obround corner relief must be longer ({length}) than wide ({size})"
+                        )));
+                    }
+                    let d = add(ni, nn);
+                    let clip = Clip::Profile(obround(
+                        crossing,
+                        scale(d, 1.0 / dot(d, d).sqrt()),
+                        length,
+                        size,
+                    ));
+                    let covers = |p: P2| clip.contains(p) || clip.on_boundary(p);
+                    let mirror = |p: P2| sub(p, scale(plane, 2.0 * dot(sub(p, vertex), plane)));
+                    let first = at(i, flange, s_end);
+                    let run = |s: f64| at(i, flange + slope * (s - s_end), s);
+                    let side_of = |s: f64| dot(sub(run(s), vertex), plane);
+                    let (g0, g1) = (side_of(st.setback), side_of(s_end));
+                    // Where the end lines cross, on the symmetry plane.
+                    let x = run(st.setback + (s_end - st.setback) * g0 / (g0 - g1));
+                    let own = run(st.setback);
+                    if ![q, x, own, mirror(own)].into_iter().all(covers) {
+                        return unsupported(
+                            "an obround corner relief that doesn't take where the bends overlap",
+                        );
+                    }
+                    let met =
+                        if covers(first) {
+                            first
+                        } else {
+                            match clip
+                                .crossings(first, x)
+                                .ok()
+                                .and_then(|ts| ts.first().copied())
+                            {
+                                Some(t) => add(first, scale(sub(x, first), t)),
+                                None => return unsupported(
+                                    "an obround corner relief its flange's end line doesn't reach",
+                                ),
+                            }
+                        };
+                    turn = (crossing, met, met);
+                    run_on = RunOn::Both;
+                    Some(clip)
+                } else if let Some(kept) = short {
                     // The flanges end short of q, where the base keeps its
                     // corner: the relief is centred where the bend centre
                     // lines cross once it covers that corner, else dropped.
@@ -2332,11 +2389,14 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         // both bends' ends cross, then along its own end.
         let start = |side: usize, t: f64| match sides[i][side] {
             End::Corner { turn, .. } if run_on(side) => {
-                if side == 0 {
+                let mut points = if side == 0 {
                     vec![turn.0, turn.1, turn.2]
                 } else {
                     vec![turn.2, turn.1, turn.0]
-                }
+                };
+                // The end meeting the relief at its own corner: one point.
+                points.dedup_by(|a, b| dist(*a, *b) <= EPS);
+                points
             }
             _ => vec![at(i, t, fold.s0)],
         };
@@ -2949,6 +3009,30 @@ pub struct MinBox {
     /// The longer side's direction, degrees counter-clockwise from +x, in
     /// [0, 180).
     pub angle: f64,
+}
+
+/// A slot with round ends, counter-clockwise: centred at `c`, its axis along
+/// the unit `d`, `length` end to end and `width` across.
+fn obround(c: P2, d: P2, length: f64, width: f64) -> Ring {
+    let (a, r) = ((length - width) / 2.0, width / 2.0);
+    let left = [-d[1], d[0]];
+    let at = |along: f64, across: f64| add(c, add(scale(d, along), scale(left, across)));
+    let (far, near) = (add(c, scale(d, a)), sub(c, scale(d, a)));
+    Ring {
+        points: vec![at(-a, -r), at(a, -r), at(a, r), at(-a, r)],
+        arcs: vec![
+            None,
+            Some(Curve::Arc(Arc {
+                center: far,
+                ccw: true,
+            })),
+            None,
+            Some(Curve::Arc(Arc {
+                center: near,
+                ccw: true,
+            })),
+        ],
+    }
 }
 
 /// A closed boundary's length, on the lines and arcs the DXF writes.
@@ -4104,6 +4188,83 @@ mod tests {
         assert_eq!(f.pierces(), 2);
         assert!((f.cut_length_outer() - 320.0).abs() < 1e-9);
         assert!((f.cut_length_inner() - std::f64::consts::PI * 8.0).abs() < 1e-9);
+    }
+
+    fn obround_corner(width: f64, length: f64) -> PartSpec {
+        let mut part = plate(vec![flange(1), flange(2)]);
+        part.base.holes.clear();
+        part.relief = Some(crate::spec::Relief {
+            shape: ReliefShape::Straight,
+            width: 2.0,
+            depth: 1.0,
+            minimum_remnant: 4.0,
+            miter_gap: None,
+            corner: Some(crate::spec::CornerRelief {
+                shape: CornerShape::Obround,
+                size: Some(width),
+                length: Some(length),
+            }),
+            seam: None,
+            transition: None,
+        });
+        part
+    }
+
+    #[test]
+    fn an_obround_corner_relief_is_a_slot_on_the_bisector() {
+        for (width, length) in [(4.0, 8.0), (3.0, 12.0)] {
+            let flat = flat_pattern(&obround_corner(width, length)).unwrap();
+            // Centred where the bend centre lines cross, its axis on the
+            // bisector into the base (the corner is (100, 60)).
+            let [l0, l1] = [&flat.bends[0].line, &flat.bends[1].line];
+            let (d0, d1) = (sub(l0[1], l0[0]), sub(l1[1], l1[0]));
+            let c = add(
+                l0[0],
+                scale(d0, cross2(sub(l1[0], l0[0]), d1) / cross2(d0, d1)),
+            );
+            let axis = scale([-1.0, -1.0], std::f64::consts::FRAC_1_SQRT_2);
+            let (a, r) = ((length - width) / 2.0, width / 2.0);
+            let inner_end = add(c, scale(axis, a));
+            let left = [-axis[1], axis[0]];
+            for side in [-1.0, 1.0] {
+                let p = add(inner_end, scale(left, side * r));
+                assert!(
+                    flat.outline.iter().any(|q| dist(*q, p) < 1e-9),
+                    "{width} x {length}: {p:?} not in {:?}",
+                    flat.outline
+                );
+            }
+            assert!(flat
+                .outline_arcs
+                .iter()
+                .flatten()
+                .filter_map(|c| c.arc())
+                .any(|arc| dist(arc.center, inner_end) < 1e-9));
+            // Each bend line ends on the slot (at 4 x 8, through its corner).
+            let on_slot = |p: P2| {
+                let t = dot(sub(p, c), axis).clamp(-a, a);
+                (dist(p, add(c, scale(axis, t))) - r).abs() < 1e-9
+            };
+            for b in &flat.bends {
+                assert!(
+                    on_slot(b.line[0]) || on_slot(b.line[1]),
+                    "{width} x {length}: {:?}",
+                    b.line
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_obround_corner_relief_must_take_where_the_bends_overlap() {
+        assert!(matches!(
+            flat_pattern(&obround_corner(4.0, 4.0)),
+            Err(SheetError::Invalid(_))
+        ));
+        assert!(matches!(
+            flat_pattern(&obround_corner(0.5, 1.5)),
+            Err(SheetError::Unsupported(_))
+        ));
     }
 
     #[test]

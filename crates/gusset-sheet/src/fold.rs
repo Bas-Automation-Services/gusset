@@ -2330,7 +2330,11 @@ mod corner_angle_tests {
                 depth: 1.0,
                 minimum_remnant: 4.0,
                 miter_gap: None,
-                corner: Some(CornerRelief { shape, size }),
+                corner: Some(CornerRelief {
+                    shape,
+                    size,
+                    length: None,
+                }),
                 seam: None,
                 transition: None,
             });

@@ -534,11 +534,19 @@
       "description": "The relief at a corner where two flanges meet.",
       "type": "object",
       "properties": {
+        "length": {
+          "description": "An obround's length, end to end, more than its width. Default twice\nits width.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "shape": {
           "$ref": "#/$defs/CornerShape"
         },
         "size": {
-          "description": "Diameter (round) or side (square). Default 4T. Larger than the\ndiagonal of where the bends overlap, centred where the bend centre\nlines cross. Smaller, on the bisector through q (where the bend start\nlines cross): its inscribed circle through q, until its corner reaches\nthe circle through q and both flanges' first corners, then at that\ncircle's centre; until then it is cut from the flat\npattern only (folded, the corner is trimmed to bend).",
+          "description": "Diameter (round), side (square) or width (obround). Default 4T. A\nround or square one larger than the\ndiagonal of where the bends overlap is centred where the bend centre\nlines cross. Smaller, on the bisector through q (where the bend start\nlines cross): its inscribed circle through q, until its corner reaches\nthe circle through q and both flanges' first corners, then at that\ncircle's centre; until then it is cut from the flat\npattern only (folded, the corner is trimmed to bend).",
           "type": [
             "number",
             "null"
@@ -606,6 +614,11 @@
           "description": "As the linear weld in 3D; the flat shows the corner closed, its flange\nedges meeting (torn when folded).",
           "type": "string",
           "const": "tear"
+        },
+        {
+          "description": "A slot with round ends, `size` wide and `length` long, on the\nbisector, centred where the bend centre lines cross. Each bend runs on\nto its flange's end (no trim to bend); the slot must take where they\noverlap. Bends of one bend allowance only.",
+          "type": "string",
+          "const": "obround"
         }
       ]
     },

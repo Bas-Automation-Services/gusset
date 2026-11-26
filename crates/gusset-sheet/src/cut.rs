@@ -219,6 +219,63 @@ impl Clip {
 
     /// Parameters t in (0, 1) where a -> b crosses the boundary, in order;
     /// Err when it only touches it, or passes through a corner of it.
+    /// Where a segment goes into or out of the clip, in order from a
+    /// (fractions of a -> b): its boundary crossings, through the profile's
+    /// corners too, where `crossings` refuses.
+    pub(crate) fn transitions(&self, a: P2, b: P2) -> Vec<f64> {
+        let d = sub(b, a);
+        let mut ts = Vec::new();
+        match self {
+            Clip::Disc { c, r } => ts = line_circle(a, b, *c, *r).unwrap_or_default(),
+            Clip::Profile(ring) => {
+                for k in 0..ring.points.len() {
+                    let (c0, c1) = segment(ring, k);
+                    if segment_distance(c0, a, b) <= EPS {
+                        ts.push(dot(sub(c0, a), d) / dot(d, d));
+                    }
+                    match arc(ring.arcs[k]) {
+                        None => {
+                            let e = sub(c1, c0);
+                            let den = cross(d, e);
+                            if den.abs() > EPS * dot(d, d).sqrt() * dot(e, e).sqrt() {
+                                let w = sub(c0, a);
+                                let (t, u) = (cross(w, e) / den, cross(w, d) / den);
+                                if (0.0..=1.0).contains(&u) {
+                                    ts.push(t);
+                                }
+                            }
+                        }
+                        Some(arc) => {
+                            let hits = match line_circle(a, b, arc.center, dist(c0, arc.center)) {
+                                Ok(hits) => hits,
+                                Err(t) => vec![t],
+                            };
+                            ts.extend(
+                                hits.into_iter()
+                                    .filter(|&t| on_arc(add(a, scale(d, t)), c0, c1, arc)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ts.retain(|t| *t > 0.0 && *t < 1.0);
+        ts.sort_by(f64::total_cmp);
+        ts.dedup_by(|x, y| (*x - *y).abs() * dot(d, d).sqrt() <= EPS);
+        // Only where the segment goes from one side to the other.
+        let inside = |t: f64| self.contains(add(a, scale(d, t)));
+        let ends: Vec<f64> = std::iter::once(0.0)
+            .chain(ts.iter().copied())
+            .chain(std::iter::once(1.0))
+            .collect();
+        (1..ends.len() - 1)
+            .filter(|&j| {
+                inside((ends[j - 1] + ends[j]) / 2.0) != inside((ends[j] + ends[j + 1]) / 2.0)
+            })
+            .map(|j| ends[j])
+            .collect()
+    }
+
     pub(crate) fn crossings(&self, a: P2, b: P2) -> Result<Vec<f64>, ()> {
         match self {
             Clip::Disc { c, r } => line_circle(a, b, *c, *r)
@@ -226,6 +283,12 @@ impl Clip {
                 .map_err(|_| ()),
             Clip::Profile(ring) => {
                 let d = sub(b, a);
+                // A segment of no length (a run-on bend's end meeting the
+                // relief at its own corner) crosses nothing; a corner on the
+                // clip's edge is taken as a corner.
+                if dot(d, d).sqrt() <= EPS {
+                    return Ok(Vec::new());
+                }
                 let mut ts = Vec::new();
                 for k in 0..ring.points.len() {
                     let (c0, c1) = segment(ring, k);
@@ -590,6 +653,17 @@ pub(crate) fn cut(
         if path_area(&pts_out, &arcs_out) <= EPS {
             return unsupported("it leaves a sliver of a cell");
         }
+        // A cell corner on the clip's edge where the clip leaves it comes in
+        // twice (as the corner and as the crossing): an edge of no length.
+        let mut k = 0;
+        while pts_out.len() > 3 && k < pts_out.len() {
+            if dist(pts_out[k], pts_out[(k + 1) % pts_out.len()]) <= EPS {
+                pts_out.remove(k);
+                arcs_out.remove(k);
+            } else {
+                k += 1;
+            }
+        }
         pieces.push((pts_out, arcs_out));
     }
     if visited.iter().any(|v| !v) {
@@ -838,12 +912,13 @@ fn cut_across(
     merge_arcs(&mut piece.polygon, &mut piece.arcs);
     layout.flat.outline = piece.polygon;
     layout.flat.outline_arcs = piece.arcs;
-    // Bend lines end where the relief cuts them.
+    // Bend lines end where the relief cuts them (through a corner of the
+    // relief too: an obround's, where its side meets its end, can lie on one).
     for bend in &mut layout.flat.bends {
         let [a, b] = bend.line;
-        let Ok(ts) = clip.crossings(a, b) else {
-            continue;
-        };
+        let ts = clip
+            .crossings(a, b)
+            .unwrap_or_else(|_| clip.transitions(a, b));
         if clip.contains(a) {
             if let Some(&t) = ts.first() {
                 bend.line[0] = add(a, scale(sub(b, a), t));
