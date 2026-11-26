@@ -45,6 +45,9 @@ pub struct PartSpec {
     /// Cross breaks: marked in the flat pattern only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_breaks: Vec<CrossBreak>,
+    /// Tabs on a flange's tip into slots in a face of the same part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tab_slots: Vec<TabSlot>,
     /// Corner seams between two flanges built as separate features (with
     /// different settings), which otherwise meet by build order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -185,6 +188,41 @@ pub struct FaceCuts {
     pub holes: Vec<Hole>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cutouts: Vec<Cutout>,
+}
+
+/// Tabs on a flange's tip and slots where that tip lands on a face of the
+/// same part (a self-locating box). Folded, the tip must stand a gap off the
+/// face (touching, the two would be one) and meet it square on; the tabs
+/// reach through their slots.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TabSlot {
+    /// The flange whose tip carries the tabs.
+    pub tip: String,
+    /// The flange whose face takes the slots.
+    pub face: String,
+    /// How many tabs, spaced equally from the first's start to the last's
+    /// end between the offsets (one: at the start offset).
+    pub count: usize,
+    /// Each tab's length along the tip.
+    pub length: f64,
+    /// How far a tab reaches past the tip. Default: through the face (the
+    /// gap plus the thickness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    /// Around each tab in its slot, at its ends (along the tip). Default 0.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance: Option<f64>,
+    /// Around each tab in its slot, across the sheet. Default 0.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance_across: Option<f64>,
+    /// From the tip's start (along its base edge's direction) to the first
+    /// tab. Default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_start: Option<f64>,
+    /// From the last tab to the tip's end. Default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_end: Option<f64>,
 }
 
 /// A cross break: a shallow X pressed into a flat face to stiffen it. It

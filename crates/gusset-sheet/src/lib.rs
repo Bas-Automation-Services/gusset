@@ -14,6 +14,7 @@ mod hem;
 mod profile;
 pub mod section;
 pub mod spec;
+mod tabs;
 
 /// Why a part can't be built.
 #[derive(Clone, Debug, PartialEq)]

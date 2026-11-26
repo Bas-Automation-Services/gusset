@@ -106,6 +106,11 @@ impl Rigid {
     pub(crate) fn apply(&self, p: P3) -> P3 {
         add(self.rot(p), self.t)
     }
+    /// The point that `apply` takes to q.
+    pub(crate) fn invert(&self, q: P3) -> P3 {
+        let d = sub(q, self.t);
+        std::array::from_fn(|j| (0..3).map(|i| self.r[i][j] * d[i]).sum())
+    }
     /// self after other: p -> self(other(p)).
     fn after(&self, other: &Rigid) -> Rigid {
         let r = std::array::from_fn(|i| {
@@ -259,6 +264,11 @@ impl<'a> Model<'a> {
             y: f.parent.rot(n),
             z: f.parent.rot(cross(x, n)),
         }
+    }
+
+    /// Where a point of flange strip `i`'s plane lies in the flat: (x, y, z).
+    pub(crate) fn unmap_flange(&self, i: usize, q: P3) -> P3 {
+        self.folds[i].child.invert(q)
     }
 
     pub(crate) fn map(&self, zone: Zone, p: P2, z: f64) -> P3 {

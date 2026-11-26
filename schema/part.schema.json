@@ -118,6 +118,13 @@
         }
       ]
     },
+    "tab_slots": {
+      "description": "Tabs on a flange's tip into slots in a face of the same part.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TabSlot"
+      }
+    },
     "thickness": {
       "type": "number",
       "format": "double"
@@ -1724,6 +1731,78 @@
       "enum": [
         "up",
         "down"
+      ]
+    },
+    "TabSlot": {
+      "description": "Tabs on a flange's tip and slots where that tip lands on a face of the\nsame part (a self-locating box). Folded, the tip must stand a gap off the\nface (touching, the two would be one) and meet it square on; the tabs\nreach through their slots.",
+      "type": "object",
+      "properties": {
+        "clearance": {
+          "description": "Around each tab in its slot, at its ends (along the tip). Default 0.1.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "clearance_across": {
+          "description": "Around each tab in its slot, across the sheet. Default 0.1.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "count": {
+          "description": "How many tabs, spaced equally from the first's start to the last's\nend between the offsets (one: at the start offset).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "face": {
+          "description": "The flange whose face takes the slots.",
+          "type": "string"
+        },
+        "height": {
+          "description": "How far a tab reaches past the tip. Default: through the face (the\ngap plus the thickness).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "length": {
+          "description": "Each tab's length along the tip.",
+          "type": "number",
+          "format": "double"
+        },
+        "offset_end": {
+          "description": "From the last tab to the tip's end. Default 0.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "offset_start": {
+          "description": "From the tip's start (along its base edge's direction) to the first\ntab. Default 0.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tip": {
+          "description": "The flange whose tip carries the tabs.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tip",
+        "face",
+        "count",
+        "length"
       ]
     },
     "Transition": {

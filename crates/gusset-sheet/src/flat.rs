@@ -622,7 +622,11 @@ pub fn flat_pattern(spec: &PartSpec) -> Result<FlatPattern, SheetError> {
 }
 
 pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
-    let mut layout = layout_cells(spec)?;
+    let mut layout = if spec.tab_slots.is_empty() {
+        layout_cells(spec)?
+    } else {
+        crate::tabs::layout(spec)?
+    };
     layout.flat.cross_breaks = cross_breaks(spec, &layout)?;
     Ok(layout)
 }
@@ -696,7 +700,7 @@ fn cross_breaks(spec: &PartSpec, layout: &Layout) -> Result<Vec<[P2; 2]>, SheetE
     Ok(lines)
 }
 
-fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
+pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
     if let Some(l) = crate::cone::layout(spec).or_else(|| crate::facets::layout(spec)) {
         return l;
     }
@@ -3333,6 +3337,7 @@ mod tests {
             jogs: Vec::new(),
             face_cuts: Vec::new(),
             cross_breaks: Vec::new(),
+            tab_slots: Vec::new(),
             corner_seams: Vec::new(),
             faces: Vec::new(),
             bends: Vec::new(),
