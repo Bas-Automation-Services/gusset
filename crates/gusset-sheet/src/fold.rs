@@ -5,7 +5,7 @@
 //!
 //! Flat frame: base cell in XY, sheet from z = 0 to z = T.
 
-use crate::flat::{layout, Curve, Cut, Fold, Layout, Zone, P2};
+use crate::flat::{layout, path_area, Cell, Curve, Cut, Fold, Layout, Zone, P2};
 use crate::spec::PartSpec;
 use crate::SheetError;
 use opengeometry::brep::{
@@ -468,7 +468,20 @@ impl<'a> Model<'a> {
     fn build(&self) -> Result<BrepEnvelope, SheetError> {
         let (t, layout) = (self.t, self.layout);
         let mut b = Builder::new("gusset".into(), accuracy())?;
-        let cells = &layout.cells;
+        // The cells, then the gussets' skins: the outer face under a rib's
+        // walls, on the outer level only.
+        let mut all: Vec<Cell> = layout.cells.clone();
+        let mut present: Vec<[bool; 2]> = vec![[true; 2]; all.len()];
+        for r in &layout.ribs {
+            for (skin, level) in &r.skins {
+                all.push(skin.clone());
+                let mut on = [false; 2];
+                on[*level] = true;
+                present.push(on);
+            }
+        }
+        let cells = &all;
+        let skin = |c: usize| c >= layout.cells.len();
 
         // Shared 2D vertices and edges.
         let key = |p: P2| ((p[0] * 1e6).round() as i64, (p[1] * 1e6).round() as i64);
@@ -532,6 +545,7 @@ impl<'a> Model<'a> {
         // Undirected edge -> (cells using it, owner cell, owner direction, arc).
         type Use2 = (usize, usize, (usize, usize), Option<Curve>);
         let mut uses: HashMap<EdgeKey, Use2> = HashMap::new();
+        let mut users: HashMap<EdgeKey, Vec<usize>> = HashMap::new();
         let all = loops
             .iter()
             .enumerate()
@@ -543,6 +557,7 @@ impl<'a> Model<'a> {
                 uses.entry(ek(p, q, la[i]))
                     .and_modify(|e| e.0 += 1)
                     .or_insert((1, c, (p, q), la[i]));
+                users.entry(ek(p, q, la[i])).or_default().push(c);
             }
         }
         if let Some(bad) = uses.values().find(|e| e.0 > 2) {
@@ -552,14 +567,41 @@ impl<'a> Model<'a> {
             )));
         }
 
-        // 3D vertices, two per flat vertex.
+        // An edge between a skin and a cell of its zone lies inside one face
+        // on the skin's level; an edge is there on a level if a cell on that
+        // level uses it, and it lies inside no face.
+        let merged = |k: &EdgeKey, level: usize| {
+            let on: Vec<usize> = users[k]
+                .iter()
+                .copied()
+                .filter(|&c| present[c][level])
+                .collect();
+            on.len() == 2 && cells[on[0]].zone == cells[on[1]].zone && (skin(on[0]) || skin(on[1]))
+        };
+        let exists = |k: &EdgeKey, level: usize| {
+            users[k].iter().any(|&c| present[c][level]) && !merged(k, level)
+        };
+        let mut needed = vec![[false; 2]; points.len()];
+        for k in users.keys() {
+            for level in 0..2 {
+                if exists(k, level) {
+                    needed[k.0][level] = true;
+                    needed[k.1][level] = true;
+                }
+            }
+        }
+        // 3D vertices, two per flat vertex (one where only a skin needs it).
         let vertex: Vec<[u32; 2]> = points
             .iter()
-            .map(|(p, zone)| {
-                [
-                    b.vertex(self.map(*zone, *p, 0.0)),
-                    b.vertex(self.map(*zone, *p, t)),
-                ]
+            .enumerate()
+            .map(|(v, (p, zone))| {
+                std::array::from_fn(|level| {
+                    if needed[v][level] {
+                        b.vertex(self.map(*zone, *p, level as f64 * t))
+                    } else {
+                        u32::MAX
+                    }
+                })
             })
             .collect();
 
@@ -647,6 +689,9 @@ impl<'a> Model<'a> {
                 continue;
             }
             for level in 0..2 {
+                if !exists(&k, level) {
+                    continue;
+                }
                 let z = level as f64 * t;
                 let e = self.edge(
                     &mut b,
@@ -679,9 +724,9 @@ impl<'a> Model<'a> {
         let on_footprint = |k: &EdgeKey| footprints.iter().any(|f| f.2.contains(k));
         // Vertical edges at outline vertices (straight, radial in a bend).
         let mut vertical: HashMap<usize, Edge> = HashMap::new();
-        for (k, &(count, _, _, _)) in &uses {
+        for (k, &(count, owner, _, _)) in &uses {
             let &(lo, hi, _) = k;
-            if count == 1 && !on_footprint(k) {
+            if count == 1 && !on_footprint(k) && !skin(owner) {
                 for v in [lo, hi] {
                     vertical.entry(v).or_insert_with(|| {
                         let (p, zone) = points[v];
@@ -756,35 +801,134 @@ impl<'a> Model<'a> {
             }
         }
 
-        // Top and bottom faces of every cell.
+        // Top and bottom faces of every cell; on a skin's level, the skin
+        // and the cell it is joined to make one face.
+        let mut group: [Vec<usize>; 2] = [(0..cells.len()).collect(), (0..cells.len()).collect()];
+        fn root(g: &mut [usize], mut c: usize) -> usize {
+            while g[c] != c {
+                g[c] = g[g[c]];
+                c = g[c];
+            }
+            c
+        }
+        for (k, us) in &users {
+            for (level, g) in group.iter_mut().enumerate() {
+                if merged(k, level) {
+                    let on: Vec<usize> =
+                        us.iter().copied().filter(|&c| present[c][level]).collect();
+                    let (a, b2) = (root(g, on[0]), root(g, on[1]));
+                    g[a.max(b2)] = a.min(b2);
+                }
+            }
+        }
         for (c, cell) in cells.iter().enumerate() {
             let zone = cell.zone;
-            // Arcs can bulge past the loop's vertices by up to their radius.
-            let pad = loops[c]
-                .0
-                .iter()
-                .zip(&loops[c].1)
-                .filter_map(|(&v, a)| {
-                    a.map(|a| match a {
-                        Curve::Arc(a) => {
-                            dot2(sub2(points[v].0, a.center), sub2(points[v].0, a.center)).sqrt()
-                        }
-                        Curve::Cut(c) => c.c[1].abs() + c.c[2].abs(),
-                    })
-                })
-                .fold(0.0, f64::max);
             for level in 0..2 {
+                if !present[c][level] {
+                    continue;
+                }
+                let members: Vec<usize> = (0..cells.len())
+                    .filter(|&m| {
+                        present[m][level]
+                            && root(&mut group[level], m) == root(&mut group[level], c)
+                    })
+                    .collect();
+                if members[0] != c {
+                    continue;
+                }
+                // The face's loops: the cell's own, or traced round the
+                // cells joined (the first counter-clockwise, the rest holes).
+                let rings: Vec<(Vec<usize>, Vec<Option<Curve>>)> = if members.len() == 1 {
+                    vec![loops[c].clone()]
+                } else {
+                    let mut next: HashMap<usize, Vec<(usize, Option<Curve>)>> = HashMap::new();
+                    let mut count = 0;
+                    for &m in &members {
+                        let (lp, la) = &loops[m];
+                        for i in 0..lp.len() {
+                            let (p, q) = (lp[i], lp[(i + 1) % lp.len()]);
+                            if !merged(&ek(p, q, la[i]), level) {
+                                next.entry(p).or_default().push((q, la[i]));
+                                count += 1;
+                            }
+                        }
+                    }
+                    let mut rings = Vec::new();
+                    while count > 0 {
+                        let start = *next.iter().find(|(_, v)| !v.is_empty()).unwrap().0;
+                        let (mut lp, mut la) = (Vec::new(), Vec::new());
+                        let mut p = start;
+                        loop {
+                            let out =
+                                next.get_mut(&p).filter(|v| v.len() == 1).ok_or_else(|| {
+                                    SheetError::Kernel(format!(
+                                        "face {}: its loops don't close",
+                                        cell.name
+                                    ))
+                                })?;
+                            let (q, arc) = out.pop().unwrap();
+                            count -= 1;
+                            lp.push(p);
+                            la.push(arc);
+                            p = q;
+                            if p == start {
+                                break;
+                            }
+                        }
+                        rings.push((lp, la));
+                    }
+                    let area = |r: &(Vec<usize>, Vec<Option<Curve>>)| {
+                        let pts: Vec<P2> = r.0.iter().map(|&v| points[v].0).collect();
+                        path_area(&pts, &r.1)
+                    };
+                    rings.sort_by(|a, b2| area(b2).total_cmp(&area(a)));
+                    if rings.iter().filter(|r| area(r) > 0.0).count() != 1 {
+                        return Err(SheetError::Kernel(format!(
+                            "face {}: not one outer loop",
+                            cell.name
+                        )));
+                    }
+                    rings
+                };
+                let (lp, la) = &rings[0];
+                // Arcs can bulge past the loop's vertices by up to their radius.
+                let pad = lp
+                    .iter()
+                    .zip(la)
+                    .filter_map(|(&v, a)| {
+                        a.map(|a| match a {
+                            Curve::Arc(a) => {
+                                dot2(sub2(points[v].0, a.center), sub2(points[v].0, a.center))
+                                    .sqrt()
+                            }
+                            Curve::Cut(c) => c.c[1].abs() + c.c[2].abs(),
+                        })
+                    })
+                    .fold(0.0, f64::max);
                 let z = level as f64 * t;
                 let surface = self.surface(zone, z, level == 1);
-                let lp = &loops[c].0;
-                let mut outer = Vec::new();
-                for i in 0..lp.len() {
-                    let (p, q) = (lp[i], lp[(i + 1) % lp.len()]);
-                    let e = edges[&(ek(p, q, loops[c].1[i]), level)];
-                    outer.push(self.use_on(&b, &surface, e, vertex[p][level], vertex[q][level])?);
-                }
+                let ring_uses =
+                    |lp: &Vec<usize>, la: &Vec<Option<Curve>>| -> Result<Vec<Use>, SheetError> {
+                        let mut ring = Vec::new();
+                        for i in 0..lp.len() {
+                            let (p, q) = (lp[i], lp[(i + 1) % lp.len()]);
+                            let e = edges[&(ek(p, q, la[i]), level)];
+                            ring.push(self.use_on(
+                                &b,
+                                &surface,
+                                e,
+                                vertex[p][level],
+                                vertex[q][level],
+                            )?);
+                        }
+                        Ok(ring)
+                    };
+                let outer = ring_uses(lp, la)?;
                 let mut hole_loops = Vec::new();
-                for hole in holes.iter().filter(|h| h.cell == c) {
+                for r in &rings[1..] {
+                    hole_loops.push(ring_uses(&r.0, &r.1)?);
+                }
+                for hole in holes.iter().filter(|h| members.contains(&h.cell)) {
                     let e = Edge {
                         id: hole.circles[level],
                         start: hole.v[level],
@@ -798,20 +942,8 @@ impl<'a> Model<'a> {
                         hole.v[level],
                     )?]);
                 }
-                for (_, lp, la) in inner.iter().filter(|r| r.0 == c) {
-                    let mut ring = Vec::new();
-                    for i in 0..lp.len() {
-                        let (p, q) = (lp[i], lp[(i + 1) % lp.len()]);
-                        let e = edges[&(ek(p, q, la[i]), level)];
-                        ring.push(self.use_on(
-                            &b,
-                            &surface,
-                            e,
-                            vertex[p][level],
-                            vertex[q][level],
-                        )?);
-                    }
-                    hole_loops.push(ring);
+                for (_, lp, la) in inner.iter().filter(|r| members.contains(&r.0)) {
+                    hole_loops.push(ring_uses(lp, la)?);
                 }
                 let key = format!(
                     "{}.{}",
@@ -839,7 +971,7 @@ impl<'a> Model<'a> {
         let mut side = 0;
         let mut outline: Vec<_> = uses
             .iter()
-            .filter(|(k, e)| e.0 == 1 && !on_footprint(k))
+            .filter(|(k, e)| e.0 == 1 && !on_footprint(k) && !skin(e.1))
             .map(|(k, e)| (e.1, e.2, *k))
             .collect();
         outline.sort();
@@ -1090,7 +1222,195 @@ impl<'a> Model<'a> {
             let e = &self.layout.embosses[*i];
             e.build_rect(&mut b, self.emboss_rigid(e), vertices, rings)?;
         }
+
+        // Gussets: the rib's inner face and side walls on the inner level's
+        // edges round its footprint, the groove's on the outer level's.
+        for r in &layout.ribs {
+            let vid = |p: P2, level: usize| -> Result<(usize, u32), SheetError> {
+                let v = *ids.get(&key(p)).ok_or_else(|| {
+                    SheetError::Kernel(format!("gusset {}: a corner isn't in the layout", r.id))
+                })?;
+                Ok((v, vertex[v][level]))
+            };
+            let seg = |p: P2, q: P2, level: usize| -> Option<(Edge, u32, u32)> {
+                let (a, va) = vid(p, level).ok()?;
+                let (c, vc) = vid(q, level).ok()?;
+                let e = edges.get(&(ek(a, c, None), level))?;
+                Some((*e, va, vc))
+            };
+            // The edges along a line through these points in order (each
+            // edge runs from one to a later one; points between that are
+            // no vertices are passed).
+            let walk = |pts: Vec<P2>, level: usize| -> Result<Vec<(Edge, u32, u32)>, SheetError> {
+                let mut out = Vec::new();
+                let mut i = 0;
+                while i + 1 < pts.len() {
+                    let (j, e) = (i + 1..pts.len())
+                        .find_map(|j| seg(pts[i], pts[j], level).map(|e| (j, e)))
+                        .ok_or_else(|| {
+                            SheetError::Kernel(format!(
+                                "gusset {}: an edge isn't in the layout",
+                                r.id
+                            ))
+                        })?;
+                    out.push(e);
+                    i = j;
+                }
+                Ok(out)
+            };
+            let parent = self.folds[r.fold].parent;
+            let (along, into) = r.directions();
+            let (along, into) = (parent.rot(along), parent.rot(into));
+            let mut s_marks = vec![
+                r.s_in[0],
+                r.s_in[1],
+                r.s_groove[0],
+                r.s_groove[1],
+                r.s_bend[0],
+                r.s_bend[1],
+            ];
+            s_marks.sort_by(f64::total_cmp);
+            let u_marks = [r.u_in[0], r.u_groove[0], r.u_groove[1], r.u_in[1]];
+            let between = |marks: &[f64], from: f64, to: f64| -> Vec<f64> {
+                let mut v: Vec<f64> = marks
+                    .iter()
+                    .copied()
+                    .filter(|&x| x >= from.min(to) - 1e-9 && x <= from.max(to) + 1e-9)
+                    .collect();
+                if from > to {
+                    v.reverse();
+                }
+                v.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
+                v
+            };
+            for (level, us, ss, tag, out, walls) in [
+                (
+                    r.inner,
+                    r.u_in,
+                    r.s_in,
+                    "inner",
+                    scale(into, -1.0),
+                    [-1.0, 1.0],
+                ),
+                (
+                    1 - r.inner,
+                    r.u_groove,
+                    r.s_groove,
+                    "groove",
+                    into,
+                    [1.0, -1.0],
+                ),
+            ] {
+                // The lines up each side, from the base side to the flange.
+                let mut slants = Vec::new();
+                for &u in &us {
+                    let ((_, va), (_, vc)) =
+                        (vid(r.flat(u, ss[0]), level)?, vid(r.flat(u, ss[1]), level)?);
+                    let pos = |v: u32| b.brep().topology.vertices[v as usize].position;
+                    let (pa, pc) = (pos(va), pos(vc));
+                    let length = norm(sub(pc, pa));
+                    let direction = scale(sub(pc, pa), 1.0 / length);
+                    let id = b.edge(
+                        CurveGeometry::Line {
+                            origin: pa,
+                            direction,
+                        },
+                        Interval::new(0.0, length).map_err(GeometryError::from)?,
+                        false,
+                    );
+                    slants.push((
+                        Edge {
+                            id,
+                            start: va,
+                            kind: Kind::Line { direction },
+                        },
+                        va,
+                        vc,
+                    ));
+                }
+                let back = |e: (Edge, u32, u32)| (e.0, e.2, e.1);
+                let up = |u: f64| -> Vec<P2> {
+                    between(&s_marks, ss[0], ss[1])
+                        .into_iter()
+                        .map(|x| r.flat(u, x))
+                        .collect()
+                };
+                let across = |s: f64, from: f64, to: f64| -> Vec<P2> {
+                    between(&u_marks, from, to)
+                        .into_iter()
+                        .map(|x| r.flat(x, s))
+                        .collect()
+                };
+                for j in 0..2 {
+                    let mut lp = walk(up(us[j]), level)?;
+                    lp.push(back(slants[j]));
+                    self.planar_face(
+                        &mut b,
+                        &format!("gusset.{}.{tag}.side{j}", r.id),
+                        lp,
+                        scale(along, walls[j]),
+                    )?;
+                }
+                let mut lp = walk(across(ss[0], us[0], us[1]), level)?;
+                lp.push(slants[1]);
+                lp.extend(walk(across(ss[1], us[1], us[0]), level)?);
+                lp.push(back(slants[0]));
+                self.planar_face(&mut b, &format!("gusset.{}.{tag}", r.id), lp, out)?;
+            }
+        }
         Ok(b.finish_solid()?)
+    }
+
+    /// A planar face on a loop of edges (each with its start and end
+    /// vertex), its normal `out` (out of the material).
+    fn planar_face(
+        &self,
+        b: &mut Builder,
+        name: &str,
+        mut lp: Vec<(Edge, u32, u32)>,
+        out: P3,
+    ) -> Result<u32, SheetError> {
+        let pos = |v: u32| b.brep().topology.vertices[v as usize].position;
+        let (p0, p1) = (pos(lp[0].1), pos(lp[0].2));
+        let z = unit(out);
+        let d = sub(p1, p0);
+        let x = unit(sub(d, scale(z, dot(d, z))));
+        let frame = Frame3 {
+            origin: p0,
+            x,
+            y: cross(z, x),
+            z,
+        };
+        // Counter-clockwise about the normal (the vertices' polygon: arcs on
+        // the loop bulge but don't turn it over).
+        let uv: Vec<[f64; 2]> = lp
+            .iter()
+            .map(|e| {
+                let l = frame.to_local(pos(e.1));
+                [l[0], l[1]]
+            })
+            .collect();
+        let area: f64 = (0..uv.len())
+            .map(|i| {
+                let (p, q) = (uv[i], uv[(i + 1) % uv.len()]);
+                p[0] * q[1] - p[1] * q[0]
+            })
+            .sum();
+        if area < 0.0 {
+            lp.reverse();
+            for e in &mut lp {
+                std::mem::swap(&mut e.1, &mut e.2);
+            }
+        }
+        let surface = Surface::Plane(frame);
+        let uses = lp
+            .iter()
+            .map(|&(e, from, to)| self.use_on(b, &surface, e, from, to))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bounds = surface.bounds(b, lp.iter().map(|e| e.1));
+        let pad = 2.0 * (self.t + self.r);
+        let bounds = bounds.map(|[lo, hi]| [lo - pad, hi + pad]);
+        Ok(b.face(name, surface.geometry(), bounds, uses)?)
     }
 
     /// The wall along a flat edge that crosses a bend at an angle: the flat
@@ -1693,6 +2013,14 @@ impl Model<'_> {
                 pieces.push((c, piece, if footprint { 2 } else { 1 }));
             }
         }
+        // A gusset's skins share the edges round the rib's footprint: no walls.
+        for (skin, _) in self.layout.ribs.iter().flat_map(|r| &r.skins) {
+            let n = skin.polygon.len();
+            for k in 0..n {
+                let piece = Piece::Line(skin.polygon[k], skin.polygon[(k + 1) % n]);
+                *count.entry(piece_key(&piece)).or_default() += 1;
+            }
+        }
         let is_wall =
             |piece: &Piece, kind: u8| kind == 1 || kind == 0 && count[&piece_key(piece)] == 1;
 
@@ -1787,6 +2115,15 @@ impl Model<'_> {
             let c = self.emboss_rigid(e).apply(m.center_of_mass);
             for j in 0..3 {
                 moment[j] += m.volume * c[j];
+            }
+        }
+        // The gussets' ribs, and the skins' faces.
+        for r in &self.layout.ribs {
+            let m = r.mass(&self.folds[r.fold].parent);
+            volume += m.volume;
+            area += m.area;
+            for j in 0..3 {
+                moment[j] += m.volume * m.center_of_mass[j];
             }
         }
         Mass {

@@ -85,6 +85,13 @@
         "$ref": "#/$defs/FoldLine"
       }
     },
+    "gussets": {
+      "description": "Gussets: ribs pressed into the inside of a flange's bend.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BendGusset"
+      }
+    },
     "hems": {
       "description": "Hems, built after the flanges (so a hem can sit on a flange's tip).",
       "type": "array",
@@ -292,6 +299,77 @@
         "id",
         "from",
         "to"
+      ]
+    },
+    "BendGusset": {
+      "description": "A gusset: a rib pressed across a bend into its inside, stiffening it. In\na section square to the bend, the sheet runs straight across the corner\nfrom the base's inner face to the flange's (the rib's inner face), with a\ngroove behind it on the outside; the rib's side walls are square to the\nbend axis. The flat pattern is the plain sheet, with the rib's footprint\non the inner face marked.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Its middle, along the flange's edge from the edge's start. Default:\nthe middle of the bend.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "depth": {
+          "description": "How far the rib's inner face lies inside the inner bend face, along\nthe bend's bisector. Give this or `legs`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "draft": {
+          "description": "The side walls' slope from square to the bend axis, degrees.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "legs": {
+          "description": "Where the rib's inner face meets the inner faces: from their virtual\nsharp, along the side the flange sits on, then along the flange.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "on": {
+          "description": "The flange whose bend it stiffens.",
+          "type": "string"
+        },
+        "shape": {
+          "$ref": "#/$defs/GussetShape",
+          "default": "flat"
+        },
+        "thickness": {
+          "description": "The rib's wall. Default: the sheet's thickness.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "width": {
+          "description": "Across the rib, at its inner face.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "on",
+        "width"
       ]
     },
     "BendLocation": {
@@ -1202,6 +1280,20 @@
         "angle",
         "location",
         "side"
+      ]
+    },
+    "GussetShape": {
+      "oneOf": [
+        {
+          "description": "A flat inner face between straight side walls.",
+          "type": "string",
+          "const": "flat"
+        },
+        {
+          "description": "A half round across the rib.",
+          "type": "string",
+          "const": "round"
+        }
       ]
     },
     "Hand": {

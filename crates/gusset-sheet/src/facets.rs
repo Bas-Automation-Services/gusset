@@ -199,6 +199,7 @@ fn build(
         folds,
         holes: Vec::new(),
         embosses: Vec::new(),
+        ribs: Vec::new(),
     };
     let model = Model::placed(spec, &layout, place);
     let cuts: Vec<[Cut; 2]> = layout

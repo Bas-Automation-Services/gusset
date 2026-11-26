@@ -183,6 +183,7 @@ impl Section {
             folds: Vec::new(),
             holes: Vec::new(),
             embosses: Vec::new(),
+            ribs: Vec::new(),
         };
         crate::cut::cut_sheet(spec, &mut layout)?;
         Ok(layout.flat)
@@ -1267,6 +1268,7 @@ pub(crate) fn layout(spec: &PartSpec) -> Option<Result<Layout, SheetError>> {
             folds: Vec::new(),
             holes: Vec::new(),
             embosses: Vec::new(),
+            ribs: Vec::new(),
         })
     })
 }

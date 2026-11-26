@@ -48,6 +48,9 @@ pub struct PartSpec {
     /// Tabs on a flange's tip into slots in a face of the same part.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tab_slots: Vec<TabSlot>,
+    /// Gussets: ribs pressed into the inside of a flange's bend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gussets: Vec<BendGusset>,
     /// Corner seams between two flanges built as separate features (with
     /// different settings), which otherwise meet by build order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -223,6 +226,52 @@ pub struct TabSlot {
     /// From the last tab to the tip's end. Default 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset_end: Option<f64>,
+}
+
+/// A gusset: a rib pressed across a bend into its inside, stiffening it. In
+/// a section square to the bend, the sheet runs straight across the corner
+/// from the base's inner face to the flange's (the rib's inner face), with a
+/// groove behind it on the outside; the rib's side walls are square to the
+/// bend axis. The flat pattern is the plain sheet, with the rib's footprint
+/// on the inner face marked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BendGusset {
+    pub id: String,
+    /// The flange whose bend it stiffens.
+    pub on: String,
+    /// Its middle, along the flange's edge from the edge's start. Default:
+    /// the middle of the bend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
+    /// Across the rib, at its inner face.
+    pub width: f64,
+    /// How far the rib's inner face lies inside the inner bend face, along
+    /// the bend's bisector. Give this or `legs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<f64>,
+    /// Where the rib's inner face meets the inner faces: from their virtual
+    /// sharp, along the side the flange sits on, then along the flange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legs: Option<[f64; 2]>,
+    /// The rib's wall. Default: the sheet's thickness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<f64>,
+    #[serde(default)]
+    pub shape: GussetShape,
+    /// The side walls' slope from square to the bend axis, degrees.
+    #[serde(default)]
+    pub draft: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GussetShape {
+    /// A flat inner face between straight side walls.
+    #[default]
+    Flat,
+    /// A half round across the rib.
+    Round,
 }
 
 /// A cross break: a shallow X pressed into a flat face to stiffen it. It

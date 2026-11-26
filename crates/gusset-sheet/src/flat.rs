@@ -569,6 +569,9 @@ pub struct Layout {
     /// The embosses, each held whole by a base cell as a hole the size of
     /// its footprint.
     pub(crate) embosses: Vec<crate::emboss::Formed>,
+    /// The gussets: each a rib the fold model builds across its bend, the
+    /// cells cut away under it.
+    pub(crate) ribs: Vec<crate::rib::Formed>,
 }
 
 #[derive(Clone, Debug)]
@@ -627,6 +630,9 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     } else {
         crate::tabs::layout(spec)?
     };
+    if !spec.gussets.is_empty() {
+        layout = crate::rib::layout(spec, layout)?;
+    }
     layout.flat.cross_breaks = cross_breaks(spec, &layout)?;
     Ok(layout)
 }
@@ -1839,6 +1845,7 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
         folds: folds.clone(),
         holes: Vec::new(),
         embosses: Vec::new(),
+        ribs: Vec::new(),
     };
     let maps = crate::fold::Model::new(spec, &shape);
     // A corner whose bends end on the miter from their starts on.
@@ -2883,6 +2890,7 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
         folds,
         holes: holes.clone(),
         embosses,
+        ribs: Vec::new(),
     };
     for (clip, cells) in &corner_clips {
         crate::cut::cut_corner(&mut layout, clip, *cells)?;
@@ -3338,6 +3346,7 @@ mod tests {
             face_cuts: Vec::new(),
             cross_breaks: Vec::new(),
             tab_slots: Vec::new(),
+            gussets: Vec::new(),
             corner_seams: Vec::new(),
             faces: Vec::new(),
             bends: Vec::new(),

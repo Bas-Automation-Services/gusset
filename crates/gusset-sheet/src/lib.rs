@@ -12,6 +12,7 @@ pub mod fold;
 mod foldline;
 mod hem;
 mod profile;
+mod rib;
 pub mod section;
 pub mod spec;
 mod tabs;
