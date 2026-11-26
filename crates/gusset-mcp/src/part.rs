@@ -66,6 +66,7 @@ pub fn build(spec: &PartSpec, out: &Outputs) -> Result<Value, String> {
     }
 
     let [lo, hi] = flat.bounds();
+    let min_box = flat.min_box();
     Ok(json!({
         "id": spec.id,
         "units": "mm, mm2, mm3, degrees",
@@ -75,6 +76,16 @@ pub fn build(spec: &PartSpec, out: &Outputs) -> Result<Value, String> {
             "min": lo.map(round),
             "max": hi.map(round),
             "area": round(flat.area()),
+            "min_box": {
+                "length": round(min_box.length),
+                "width": round(min_box.width),
+                "angle": round(min_box.angle),
+            },
+            "cut_length": round(flat.cut_length()),
+            "cut_length_outer": round(flat.cut_length_outer()),
+            "cut_length_inner": round(flat.cut_length_inner()),
+            "pierces": flat.pierces(),
+            "bend_count": flat.bend_count(),
             "holes": flat.holes.len(),
             "cutouts": flat.cutouts.len(),
             "punches": flat.punches.len(),
@@ -160,6 +171,16 @@ mod tests {
         assert!((s["folded"]["volume"].as_f64().unwrap() - (17742.4778 - hole)).abs() < 1e-3);
         assert_eq!(s["flat"]["width"].as_f64(), Some(100.0));
         assert_eq!(s["flat"]["holes"], 1);
+        assert_eq!(s["flat"]["pierces"], 2);
+        let flat = &s["flat"];
+        let total = flat["cut_length"].as_f64().unwrap();
+        let parts =
+            flat["cut_length_outer"].as_f64().unwrap() + flat["cut_length_inner"].as_f64().unwrap();
+        assert!((total - parts).abs() < 1e-3);
+        assert!(
+            flat["min_box"]["length"].as_f64().unwrap()
+                >= flat["min_box"]["width"].as_f64().unwrap()
+        );
         assert_eq!(s["bends"].as_array().unwrap().len(), 1);
         let b = &s["bends"][0];
         assert_eq!(

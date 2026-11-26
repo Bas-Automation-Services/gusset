@@ -2808,35 +2808,118 @@ impl FlatPattern {
         [[x.0, y.0], [x.1, y.1]]
     }
 
+    /// The smallest rectangle around the blank at any rotation, as a nesting
+    /// or quoting tool sizes a sheet part. Arcs exact; mitered bend ends on the
+    /// lines the DXF writes.
+    pub fn min_box(&self) -> MinBox {
+        let (points, arcs) = lines_and_arcs(&self.outline, &self.outline_arcs);
+        let ring = Ring {
+            points,
+            arcs: arcs.into_iter().map(|a| a.map(Curve::Arc)).collect(),
+        };
+        let size = |t: f64| {
+            let (u, v) = ([t.cos(), t.sin()], [-t.sin(), t.cos()]);
+            let (a, b) = (
+                extent_along(&ring, u, [0.0; 2]),
+                extent_along(&ring, v, [0.0; 2]),
+            );
+            (a.1 - a.0, b.1 - b.0)
+        };
+        let area = |t: f64| {
+            let (a, b) = size(t);
+            a * b
+        };
+        let quarter = std::f64::consts::FRAC_PI_2;
+        // A polygon's smallest box has a side along an edge of its convex hull
+        // (Freeman and Shapira). Arcs can put the best angle between those:
+        // a scan over the quarter turn, each low point refined.
+        let mut candidates: Vec<f64> = convex_hull(&ring.points)
+            .windows(2)
+            .map(|w| {
+                let d = sub(w[1], w[0]);
+                d[1].atan2(d[0]).rem_euclid(quarter)
+            })
+            .collect();
+        let steps = 720;
+        let h = quarter / steps as f64;
+        let scan: Vec<f64> = (0..steps).map(|k| area(k as f64 * h)).collect();
+        for k in 0..steps {
+            let (before, after) = (scan[(k + steps - 1) % steps], scan[(k + 1) % steps]);
+            if scan[k] <= before && scan[k] <= after {
+                // Golden section on [t - h, t + h].
+                let (mut a, mut b) = (k as f64 * h - h, k as f64 * h + h);
+                let g = (5f64.sqrt() - 1.0) / 2.0;
+                for _ in 0..80 {
+                    let (c, d) = (b - g * (b - a), a + g * (b - a));
+                    if area(c) <= area(d) {
+                        b = d;
+                    } else {
+                        a = c;
+                    }
+                }
+                candidates.push((a + b) / 2.0);
+            }
+        }
+        let t = candidates
+            .into_iter()
+            .min_by(|a, b| area(*a).total_cmp(&area(*b)))
+            .unwrap_or(0.0);
+        let (a, b) = size(t);
+        let (length, width, along) = if a >= b {
+            (a, b, t)
+        } else {
+            (b, a, t + quarter)
+        };
+        MinBox {
+            length,
+            width,
+            angle: along.to_degrees().rem_euclid(180.0),
+        }
+    }
+
     /// Length of every cut, mm: the outline, the cut-outs (punch stamps
     /// included) and the holes, measured on the lines and arcs the DXF writes.
     pub fn cut_length(&self) -> f64 {
-        let ring_length = |pts: &[P2], curves: &[Option<Curve>]| -> f64 {
-            let (pts, arcs) = lines_and_arcs(pts, curves);
-            (0..pts.len())
-                .map(|k| {
-                    let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
-                    match arcs[k] {
-                        None => dot(sub(b, a), sub(b, a)).sqrt(),
-                        Some(arc) => {
-                            dot(sub(a, arc.center), sub(a, arc.center)).sqrt()
-                                * arc.sweep(a, b).abs()
-                        }
-                    }
-                })
-                .sum()
-        };
+        self.cut_length_outer() + self.cut_length_inner()
+    }
+
+    /// Length of the outline's cut, mm.
+    pub fn cut_length_outer(&self) -> f64 {
         ring_length(&self.outline, &self.outline_arcs)
-            + self
-                .cutouts
-                .iter()
-                .map(|c| ring_length(&c.points, &c.arcs))
-                .sum::<f64>()
+    }
+
+    /// Length of the cuts inside the outline, mm: the cut-outs (punch stamps
+    /// included) and the holes.
+    pub fn cut_length_inner(&self) -> f64 {
+        self.cutouts
+            .iter()
+            .map(|c| ring_length(&c.points, &c.arcs))
+            .sum::<f64>()
             + self
                 .holes
                 .iter()
                 .map(|h| std::f64::consts::PI * h.diameter)
                 .sum::<f64>()
+    }
+
+    /// Bends the press brake makes: the pieces of one feature's bend on one
+    /// line (a fold across prongs, its line broken where the outline is) count
+    /// once.
+    pub fn bend_count(&self) -> usize {
+        let mut lines: Vec<(&str, P2, P2)> = Vec::new();
+        for b in &self.bends {
+            let d = sub(b.line[1], b.line[0]);
+            let u = scale(d, 1.0 / dot(d, d).sqrt());
+            let same = |(f, p, v): &(&str, P2, P2)| {
+                *f == b.flange
+                    && cross2(*v, u).abs() < 1e-9
+                    && cross2(*v, sub(b.line[0], *p)).abs() < 1e-6
+            };
+            if !lines.iter().any(same) {
+                lines.push((&b.flange, b.line[0], u));
+            }
+        }
+        lines.len()
     }
 
     /// Closed cuts the laser starts: the outline, each cut-out and each hole.
@@ -2854,6 +2937,66 @@ impl FlatPattern {
                 .map(|h| std::f64::consts::PI * h.diameter * h.diameter / 4.0)
                 .sum::<f64>()
     }
+}
+
+/// The smallest rectangle around a flat blank (`FlatPattern::min_box`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MinBox {
+    /// The longer side, mm.
+    pub length: f64,
+    /// The shorter side, mm.
+    pub width: f64,
+    /// The longer side's direction, degrees counter-clockwise from +x, in
+    /// [0, 180).
+    pub angle: f64,
+}
+
+/// A closed boundary's length, on the lines and arcs the DXF writes.
+fn ring_length(pts: &[P2], curves: &[Option<Curve>]) -> f64 {
+    let (pts, arcs) = lines_and_arcs(pts, curves);
+    (0..pts.len())
+        .map(|k| {
+            let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+            match arcs[k] {
+                None => dot(sub(b, a), sub(b, a)).sqrt(),
+                Some(arc) => {
+                    dot(sub(a, arc.center), sub(a, arc.center)).sqrt() * arc.sweep(a, b).abs()
+                }
+            }
+        })
+        .sum()
+}
+
+/// The convex hull of points, counter-clockwise, closed (the first point
+/// repeated at the end).
+fn convex_hull(points: &[P2]) -> Vec<P2> {
+    let mut p = points.to_vec();
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    p.dedup_by(|a, b| dist(*a, *b) < EPS);
+    if p.len() < 3 {
+        return p;
+    }
+    let turn = |o: P2, a: P2, b: P2| cross2(sub(a, o), sub(b, o));
+    let mut hull: Vec<P2> = Vec::new();
+    for pass in [false, true] {
+        let start = hull.len();
+        let points: Box<dyn Iterator<Item = &P2>> = if pass {
+            Box::new(p.iter().rev())
+        } else {
+            Box::new(p.iter())
+        };
+        for &q in points {
+            while hull.len() >= start + 2
+                && turn(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(q);
+        }
+        hull.pop();
+    }
+    hull.push(hull[0]);
+    hull
 }
 
 fn signed_area(p: &[P2]) -> f64 {
@@ -3959,6 +4102,81 @@ mod tests {
             f.cut_length()
         );
         assert_eq!(f.pierces(), 2);
+        assert!((f.cut_length_outer() - 320.0).abs() < 1e-9);
+        assert!((f.cut_length_inner() - std::f64::consts::PI * 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bend_count_takes_one_line_once() {
+        let mut f = flat_pattern(&plate(vec![flange(2)])).unwrap();
+        assert_eq!((f.bends.len(), f.bend_count()), (1, 1));
+        // The same bend broken in two (a fold across two prongs): one bend.
+        let mut piece = f.bends[0].clone();
+        let [a, b] = piece.line;
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        f.bends[0].line = [a, mid];
+        piece.line = [
+            [mid[0] + (b[0] - a[0]) * 0.1, mid[1] + (b[1] - a[1]) * 0.1],
+            b,
+        ];
+        f.bends.push(piece.clone());
+        assert_eq!((f.bends.len(), f.bend_count()), (2, 1));
+        // A bend of the same feature on a parallel line (a contour's next one): two.
+        piece.line = piece.line.map(|p| [p[0] + 1.0, p[1] + 1.0]);
+        f.bends.push(piece);
+        assert_eq!((f.bends.len(), f.bend_count()), (3, 2));
+    }
+
+    fn min_box_of(outline: Vec<P2>, bulges: Vec<f64>) -> MinBox {
+        let mut spec = plate(Vec::new());
+        spec.base.outline = outline;
+        spec.base.bulges = bulges;
+        spec.base.holes.clear();
+        flat_pattern(&spec).unwrap().min_box()
+    }
+
+    #[test]
+    fn min_box_of_a_turned_rectangle_is_the_rectangle() {
+        let (c, s) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+        let outline = [[0.0, 0.0], [100.0, 0.0], [100.0, 60.0], [0.0, 60.0]]
+            .map(|[x, y]| [x * c - y * s + 20.0, x * s + y * c + 5.0])
+            .to_vec();
+        let b = min_box_of(outline, Vec::new());
+        assert!((b.length - 100.0).abs() < 1e-9, "{b:?}");
+        assert!((b.width - 60.0).abs() < 1e-9, "{b:?}");
+        assert!((b.angle - 30.0).abs() < 1e-9, "{b:?}");
+    }
+
+    #[test]
+    fn min_box_of_a_pentagon_lies_along_a_hull_edge() {
+        // Smaller than the box along its longest edge, its first edge or the
+        // axes: along the edge (44, 35) -> (59, 36) it is 52.809... x 6.857...
+        let b = min_box_of(
+            vec![
+                [44.0, 35.0],
+                [59.0, 36.0],
+                [82.0, 44.0],
+                [94.0, 52.0],
+                [64.0, 45.0],
+            ],
+            Vec::new(),
+        );
+        assert!((b.length - 52.80969045930959).abs() < 1e-9, "{b:?}");
+        assert!((b.width - 6.85786804564907).abs() < 1e-9, "{b:?}");
+        assert!((b.angle - 19.17900802581072).abs() < 1e-9, "{b:?}");
+    }
+
+    #[test]
+    fn min_box_of_a_slot_follows_its_arcs() {
+        // A 20 x 60 slot turned by 10 degrees: two half circles of radius 10.
+        let (c, s) = (10f64.to_radians().cos(), 10f64.to_radians().sin());
+        let outline = [[10.0, 0.0], [50.0, 0.0], [50.0, 20.0], [10.0, 20.0]]
+            .map(|[x, y]| [x * c - y * s, x * s + y * c])
+            .to_vec();
+        let b = min_box_of(outline, vec![0.0, 1.0, 0.0, 1.0]);
+        assert!((b.length - 60.0).abs() < 1e-9, "{b:?}");
+        assert!((b.width - 20.0).abs() < 1e-9, "{b:?}");
+        assert!((b.angle - 10.0).abs() < 1e-9, "{b:?}");
     }
 
     #[test]

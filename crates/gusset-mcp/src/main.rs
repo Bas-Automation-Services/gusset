@@ -77,7 +77,8 @@ struct Gusset {
 #[tool_router]
 impl Gusset {
     #[tool(description = concat!(
-        "Build a sheet metal part and sum it up: flat pattern size and area, folded volume, ",
+        "Build a sheet metal part and sum it up: flat pattern size and area, its smallest box at any ",
+        "rotation, cut lengths and pierces, folded volume, ",
         "surface area and centre of mass, the bend table (order, direction, angle, inner radius) ",
         "and shop-check findings (bend radius, leg length, hole distances and size). Optionally ",
         "writes STEP, flat DXF and flat SVG files. A part Gusset can't build (a mistake in the ",

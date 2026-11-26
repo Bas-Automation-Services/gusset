@@ -57,6 +57,9 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   list them), with a note at each bend line in the flat DXF and SVG.
 - **Unfolding** by K-factor (per part or per feature) or by a bend table (DIN 6935 style: bend deduction by radius and angle).
 - **Shop checks:** bend radius, leg length, hole distance to bends and edges, hole size.
+- **Quoting numbers:** the flat's smallest box at any rotation (arcs exact), its area with
+  the holes out, cut length (outline and inner cuts apart), pierces and bend count (a fold
+  broken by the outline counts once).
 - **Parts that fold into themselves** are refused, naming the features and where they meet;
   `clash::clashes` gives the overlapping areas on the flat pattern, `clash::preview` the
   folded sheet anyway with the clash marked.

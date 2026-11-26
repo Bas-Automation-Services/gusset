@@ -82,13 +82,17 @@ pub fn preview(json: &str) -> Result<Preview, JsError> {
     })
 }
 
-/// The flat blank's size (mm, along x and y), its cut length (mm) and
-/// pierces (closed cuts), and its bends (feature, order, angle, inner radius,
+/// The flat blank's size (mm, along x and y), its smallest box at any
+/// rotation (length, width, angle of the length side in degrees), its area
+/// (mm2, holes out), its cut length (mm; the outline's and the inner cuts'
+/// too) and pierces (closed cuts), its bend count (pieces of one bend line
+/// once), and its bends (feature, order, angle, inner radius,
 /// K-factor, up, length, and the bend line's ends in the base frame), as JSON.
 #[wasm_bindgen]
 pub fn flat(json: &str) -> Result<String, JsError> {
     let f = kernel(flat_pattern(&part(json)?))?;
     let [lo, hi] = f.bounds();
+    let min_box = f.min_box();
     let bends: Vec<serde_json::Value> = f
         .bends
         .iter()
@@ -109,8 +113,17 @@ pub fn flat(json: &str) -> Result<String, JsError> {
     Ok(serde_json::json!({
         "width": hi[0] - lo[0],
         "height": hi[1] - lo[1],
+        "min_box": {
+            "length": min_box.length,
+            "width": min_box.width,
+            "angle": min_box.angle,
+        },
+        "area": f.area(),
         "cut_length": f.cut_length(),
+        "cut_length_outer": f.cut_length_outer(),
+        "cut_length_inner": f.cut_length_inner(),
         "pierces": f.pierces(),
+        "bend_count": f.bend_count(),
         "bends": bends,
     })
     .to_string())
