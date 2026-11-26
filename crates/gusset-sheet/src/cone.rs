@@ -211,6 +211,7 @@ impl Section {
             bends: Vec::new(),
             punches: Vec::new(),
             forms: Vec::new(),
+            cross_breaks: Vec::new(),
         }
     }
 

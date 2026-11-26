@@ -86,7 +86,7 @@ pub fn preview(json: &str) -> Result<Preview, JsError> {
 /// rotation (length, width, angle of the length side in degrees), its area
 /// (mm2, holes out), its cut length (mm; the outline's and the inner cuts'
 /// too) and pierces (closed cuts), its bend count (pieces of one bend line
-/// once), and its bends (feature, order, angle, inner radius,
+/// once), its cross break lines, and its bends (feature, order, angle, inner radius,
 /// K-factor, up, length, and the bend line's ends in the base frame), as JSON.
 #[wasm_bindgen]
 pub fn flat(json: &str) -> Result<String, JsError> {
@@ -124,6 +124,7 @@ pub fn flat(json: &str) -> Result<String, JsError> {
         "cut_length_inner": f.cut_length_inner(),
         "pierces": f.pierces(),
         "bend_count": f.bend_count(),
+        "cross_breaks": f.cross_breaks,
         "bends": bends,
     })
     .to_string())

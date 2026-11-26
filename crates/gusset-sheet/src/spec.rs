@@ -42,6 +42,9 @@ pub struct PartSpec {
     /// Holes and cut-outs placed on a flange's face instead of in the flat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub face_cuts: Vec<FaceCuts>,
+    /// Cross breaks: marked in the flat pattern only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_breaks: Vec<CrossBreak>,
     /// Corner seams between two flanges built as separate features (with
     /// different settings), which otherwise meet by build order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -182,6 +185,18 @@ pub struct FaceCuts {
     pub holes: Vec<Hole>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cutouts: Vec<Cutout>,
+}
+
+/// A cross break: a shallow X pressed into a flat face to stiffen it. It
+/// changes no geometry here (the folded part is the same): the flat pattern
+/// marks its lines, corner to corner of the face's box (along the flange's
+/// edge for a flange), cut to the face.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CrossBreak {
+    /// The flange whose face it is on; the base when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
 }
 
 /// A Z-step: the part to the right of `line[0] -> line[1]` (seen from +z)

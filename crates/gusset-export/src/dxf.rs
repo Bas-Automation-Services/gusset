@@ -2,7 +2,7 @@
 //! lines, on the layers sheet metal flat patterns commonly use
 //! (Outer, Inner, BendUp, BendDown), a note at each bend (BendNotes: order,
 //! direction, angle, radius), each punch stamp's centre and ID (Punches) and
-//! each emboss's footprint and id (Forms).
+//! each emboss's footprint and id (Forms), and cross break lines (CrossBreak).
 //! Millimetres, base frame.
 
 use gusset_sheet::flat::{lines_and_arcs, FlatPattern};
@@ -35,6 +35,9 @@ pub fn flat_dxf(flat: &FlatPattern) -> String {
         pair(20, &num(hole.center[1]));
         pair(30, "0.0");
         pair(40, &num(hole.diameter / 2.0));
+    }
+    for [a, b] in &flat.cross_breaks {
+        line(&mut pair, "CrossBreak", *a, *b);
     }
     for bend in &flat.bends {
         let layer = if bend.up { "BendUp" } else { "BendDown" };

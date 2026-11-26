@@ -29,6 +29,8 @@ pub struct FlatPattern {
     /// Every emboss's footprint (where the sheet leaves the plate). Not cut:
     /// the plate stays whole in the flat.
     pub forms: Vec<FlatForm>,
+    /// Cross break lines, marked only.
+    pub cross_breaks: Vec<[P2; 2]>,
 }
 
 /// Where a formed feature leaves the flat plate.
@@ -620,6 +622,81 @@ pub fn flat_pattern(spec: &PartSpec) -> Result<FlatPattern, SheetError> {
 }
 
 pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
+    let mut layout = layout_cells(spec)?;
+    layout.flat.cross_breaks = cross_breaks(spec, &layout)?;
+    Ok(layout)
+}
+
+/// Each cross break's lines: corner to corner of its face's box (in the
+/// base frame for the base, along the flange's edge for a flange), cut to the
+/// face (the largest cell of it).
+fn cross_breaks(spec: &PartSpec, layout: &Layout) -> Result<Vec<[P2; 2]>, SheetError> {
+    let mut lines = Vec::new();
+    for cb in &spec.cross_breaks {
+        if spec.base.cone.is_some() || spec.base.loft.is_some() {
+            return Err(SheetError::Unsupported(
+                "a cross break on a cone or a loft".into(),
+            ));
+        }
+        let (zone_of, u) = match &cb.on {
+            None => (None, [1.0, 0.0]),
+            Some(id) => {
+                let k = layout
+                    .folds
+                    .iter()
+                    .rposition(|f| &f.flange == id)
+                    .ok_or_else(|| SheetError::Invalid(format!("cross break: no flange {id}")))?;
+                (Some(k), layout.folds[k].u)
+            }
+        };
+        let face = layout
+            .cells
+            .iter()
+            .filter(|c| match zone_of {
+                None => c.zone == Zone::Base,
+                Some(k) => c.zone == Zone::Flange(k),
+            })
+            .max_by(|a, b| {
+                path_area(&a.polygon, &a.arcs).total_cmp(&path_area(&b.polygon, &b.arcs))
+            })
+            .ok_or_else(|| SheetError::Invalid("cross break: its face isn't in the flat".into()))?;
+        let v = [-u[1], u[0]];
+        let (along, across): (Vec<f64>, Vec<f64>) =
+            face.polygon.iter().map(|&p| (dot(p, u), dot(p, v))).unzip();
+        let lo = |w: &[f64]| w.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = |w: &[f64]| w.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let point = |a: f64, c: f64| add(scale(u, a), scale(v, c));
+        let clip = crate::cut::Clip::Profile(Ring {
+            points: face.polygon.clone(),
+            arcs: face.arcs.clone(),
+        });
+        for [a, b] in [
+            [
+                point(lo(&along), lo(&across)),
+                point(hi(&along), hi(&across)),
+            ],
+            [
+                point(hi(&along), lo(&across)),
+                point(lo(&along), hi(&across)),
+            ],
+        ] {
+            // The pieces of the diagonal inside the face.
+            let d = sub(b, a);
+            let mut ts = vec![0.0];
+            ts.extend(clip.transitions(a, b));
+            ts.push(1.0);
+            for w in ts.windows(2) {
+                let mid = add(a, scale(d, (w[0] + w[1]) / 2.0));
+                if w[1] - w[0] > EPS && (clip.contains(mid) || clip.on_boundary(mid)) {
+                    lines.push([add(a, scale(d, w[0])), add(a, scale(d, w[1]))]);
+                }
+            }
+        }
+    }
+    Ok(lines)
+}
+
+fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
     if let Some(l) = crate::cone::layout(spec).or_else(|| crate::facets::layout(spec)) {
         return l;
     }
@@ -1752,6 +1829,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             bends: Vec::new(),
             punches: Vec::new(),
             forms: Vec::new(),
+            cross_breaks: Vec::new(),
         },
         cells: Vec::new(),
         folds: folds.clone(),
@@ -2795,6 +2873,7 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     outline: e.ring(),
                 })
                 .collect(),
+            cross_breaks: Vec::new(),
         },
         cells,
         folds,
@@ -3253,6 +3332,7 @@ mod tests {
 
             jogs: Vec::new(),
             face_cuts: Vec::new(),
+            cross_breaks: Vec::new(),
             corner_seams: Vec::new(),
             faces: Vec::new(),
             bends: Vec::new(),
@@ -4381,6 +4461,73 @@ mod tests {
             flat_pattern(&obround_corner(0.5, 1.5)),
             Err(SheetError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn a_cross_break_marks_its_face_corner_to_corner() {
+        let close = |a: [P2; 2], b: [P2; 2]| {
+            (dist(a[0], b[0]) < 1e-9 && dist(a[1], b[1]) < 1e-9)
+                || (dist(a[0], b[1]) < 1e-9 && dist(a[1], b[0]) < 1e-9)
+        };
+        // The base of a plate: its two diagonals.
+        let mut part = plate(Vec::new());
+        part.cross_breaks = vec![crate::spec::CrossBreak { on: None }];
+        let flat = flat_pattern(&part).unwrap();
+        assert_eq!(flat.cross_breaks.len(), 2);
+        assert!(close(flat.cross_breaks[0], [[0.0, 0.0], [100.0, 60.0]]));
+        assert!(close(flat.cross_breaks[1], [[100.0, 0.0], [0.0, 60.0]]));
+        // An L: the box's diagonals, cut to the face.
+        part.base.outline = vec![
+            [0.0, 0.0],
+            [100.0, 0.0],
+            [100.0, 30.0],
+            [40.0, 30.0],
+            [40.0, 60.0],
+            [0.0, 60.0],
+        ];
+        part.base.holes.clear();
+        let flat = flat_pattern(&part).unwrap();
+        assert!(flat
+            .cross_breaks
+            .iter()
+            .any(|&l| close(l, [[0.0, 0.0], [50.0, 30.0]])));
+        assert!(flat
+            .cross_breaks
+            .iter()
+            .any(|&l| close(l, [[100.0, 0.0], [50.0, 30.0]])));
+        assert!(flat
+            .cross_breaks
+            .iter()
+            .any(|&l| close(l, [[40.0, 36.0], [0.0, 60.0]])));
+        assert_eq!(flat.cross_breaks.len(), 3);
+        // A flange: corner to corner of its flat face, past the bend.
+        let mut part = plate(vec![flange(1)]);
+        part.cross_breaks = vec![crate::spec::CrossBreak {
+            on: Some("f1".into()),
+        }];
+        let flat = flat_pattern(&part).unwrap();
+        // The bend's far edge: its line plus half the allowance (R 2, T 2,
+        // K 0.4: 2.8 pi / 2); the tip: the outline's furthest x.
+        let be = flat.bends[0].line[0][0] + 2.8 * std::f64::consts::PI / 4.0;
+        let tip = flat.outline.iter().map(|p| p[0]).fold(f64::MIN, f64::max);
+        assert_eq!(flat.cross_breaks.len(), 2);
+        assert!(
+            flat.cross_breaks
+                .iter()
+                .any(|&l| close(l, [[be, 0.0], [tip, 60.0]])),
+            "{:?}",
+            flat.cross_breaks
+        );
+        assert!(
+            flat.cross_breaks
+                .iter()
+                .any(|&l| close(l, [[tip, 0.0], [be, 60.0]])),
+            "{:?}",
+            flat.cross_breaks
+        );
+        // An unknown flange.
+        part.cross_breaks[0].on = Some("nope".into());
+        assert!(matches!(flat_pattern(&part), Err(SheetError::Invalid(_))));
     }
 
     #[test]

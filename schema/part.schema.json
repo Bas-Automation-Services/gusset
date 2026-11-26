@@ -50,6 +50,13 @@
         "$ref": "#/$defs/CornerSeam"
       }
     },
+    "cross_breaks": {
+      "description": "Cross breaks: marked in the flat pattern only.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CrossBreak"
+      }
+    },
     "face_cuts": {
       "description": "Holes and cut-outs placed on a flange's face instead of in the flat.",
       "type": "array",
@@ -626,6 +633,20 @@
           "const": "constant_width"
         }
       ]
+    },
+    "CrossBreak": {
+      "description": "A cross break: a shallow X pressed into a flat face to stiffen it. It\nchanges no geometry here (the folded part is the same): the flat pattern\nmarks its lines, corner to corner of the face's box (along the flange's\nedge for a flange), cut to the face.",
+      "type": "object",
+      "properties": {
+        "on": {
+          "description": "The flange whose face it is on; the base when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "Cutout": {
       "description": "A cut-out: a closed profile of lines and arcs, counter-clockwise seen\nfrom +z, cut through the flat sheet. Segment `k` runs from `outline[k]`\nto `outline[k + 1]` (wrapping).",

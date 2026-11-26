@@ -3,9 +3,9 @@
 //! (down). Millimetres; y is flipped so the base frame's +y points up.
 //! Bend notes (order, direction, angle, radius) as text along the bend lines.
 //! Punch stamps as a centre cross with the punch's ID; emboss footprints as
-//! outlines with their id.
+//! outlines with their id; cross breaks as their lines.
 //! Classes for styling: `cut`, `hole`, `bend up` / `bend down`, `bend-note`,
-//! `punch`, `punch-id`, `form`, `form-id`, `clash`.
+//! `punch`, `punch-id`, `form`, `form-id`, `cross-break`, `clash`.
 
 use gusset_sheet::flat::{lines_and_arcs, Arc, FlatPattern};
 use std::fmt::Write;
@@ -71,6 +71,17 @@ pub fn flat_svg_marked(flat: &FlatPattern, marks: &[Vec<[f64; 2]>]) -> String {
             num(-b.line[0][1]),
             num(b.line[1][0]),
             num(-b.line[1][1])
+        )
+        .unwrap();
+    }
+    for [a, b] in &flat.cross_breaks {
+        writeln!(
+            out,
+            r#"<line class="cross-break" x1="{}" y1="{}" x2="{}" y2="{}" vector-effect="non-scaling-stroke"/>"#,
+            num(a[0]),
+            num(-a[1]),
+            num(b[0]),
+            num(-b[1])
         )
         .unwrap();
     }

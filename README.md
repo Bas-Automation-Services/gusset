@@ -55,6 +55,8 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   plate (the base, a flange, a face), either way, at the sheet's thickness: a drafted or
   straight wall between two rounded corners, exact (tori, cones, cylinders); the flat pattern
   marks the footprint.
+- **Cross breaks** on the base or a flange: marked in the flat (DXF layer CrossBreak, SVG),
+  corner to corner of the face; no geometry.
 - **Bend order:** every bend numbered in the order it's made (outermost first, or as you
   list them), with a note at each bend line in the flat DXF and SVG.
 - **Unfolding** by K-factor (per part or per feature) or by a bend table (DIN 6935 style: bend deduction by radius and angle).
