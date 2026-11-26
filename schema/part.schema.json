@@ -619,6 +619,11 @@
           "description": "A slot with round ends, `size` wide and `length` long, on the\nbisector, centred where the bend centre lines cross. Each bend runs on\nto its flange's end (no trim to bend); the slot must take where they\noverlap. Bends of one bend allowance only.",
           "type": "string",
           "const": "obround"
+        },
+        {
+          "description": "Each bend ends where its inner face lies half the miter gap from the\ncorner's symmetry plane, from its start to its end (as a contour's\nlater bends at a miter): folded, the bends keep the miter gap apart.\nIn the base, a half circle of the gap's diameter joins the two bend\nstarts. No `size`. Bends of one bend allowance only.",
+          "type": "string",
+          "const": "constant_width"
         }
       ]
     },

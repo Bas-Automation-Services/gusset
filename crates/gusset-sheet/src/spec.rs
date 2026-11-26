@@ -486,6 +486,12 @@ pub enum CornerShape {
     /// to its flange's end (no trim to bend); the slot must take where they
     /// overlap. Bends of one bend allowance only.
     Obround,
+    /// Each bend ends where its inner face lies half the miter gap from the
+    /// corner's symmetry plane, from its start to its end (as a contour's
+    /// later bends at a miter): folded, the bends keep the miter gap apart.
+    /// In the base, a half circle of the gap's diameter joins the two bend
+    /// starts. No `size`. Bends of one bend allowance only.
+    ConstantWidth,
 }
 
 /// The notch's end, past the start of the bend.

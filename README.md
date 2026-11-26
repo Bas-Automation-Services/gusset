@@ -19,7 +19,8 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   chamfered tip corners.
 - **Corners** between flanges at any angle: trim to bend with a miter gap, round, square,
   weld or tear reliefs, obround reliefs (a slot on the bisector; the bends run on to their
-  flanges' ends), overlapping seams; flanges, hems and contours with different settings
+  flanges' ends), constant width (the bends end on the miter, the gap apart, from their
+  starts on), overlapping seams; flanges, hems and contours with different settings
   meeting by build order, or joined by a corner seam. Lips on both flanges at a corner are mitered there like one contour
   along both edges when flanges and lips are alike (one feature on two edges).
 - **Hems:** single, double, teardrop, rolled, full or partial width.

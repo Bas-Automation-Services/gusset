@@ -1569,6 +1569,19 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                     corner_clips.push((clip, run_on != RunOn::Flat));
                 }
             }
+            // A constant width: both bends end on the miter, from their
+            // starts on (no trim to bend), the base joining them with a half
+            // circle.
+            if shape == CornerShape::ConstantWidth
+                && (short.is_some()
+                    || lips
+                    || seam != Seam::Miter
+                    || (folds[k].bend_allowance - folds[m].bend_allowance).abs() > EPS)
+            {
+                return unsupported(
+                    "a constant width corner relief with lips, a seam, a flange starting short of its bend, or bends of different allowances",
+                );
+            }
             // A lip at a relieved corner continues its flange's edge as at a
             // trimmed one; at a sloped
             // flange edge it does something else.
@@ -1583,11 +1596,13 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 shape,
                 run_on,
                 turn,
-                miter: (one_contour || alike).then_some(Miter {
-                    vertex,
-                    plane,
-                    half_gap,
-                }),
+                miter: (one_contour || alike || shape == CornerShape::ConstantWidth).then_some(
+                    Miter {
+                        vertex,
+                        plane,
+                        half_gap,
+                    },
+                ),
             };
         }
     }
@@ -1744,6 +1759,16 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         embosses: Vec::new(),
     };
     let maps = crate::fold::Model::new(spec, &shape);
+    // A corner whose bends end on the miter from their starts on.
+    let constant = |i: usize, side: usize| {
+        matches!(
+            sides[i][side],
+            End::Corner {
+                shape: CornerShape::ConstantWidth,
+                ..
+            }
+        )
+    };
     // A mitered chain's end along edge i at flat s, past its first bend:
     // where the miter's face of the strip there lies half the gap from the
     // symmetry plane. Every fold turns about an axis along the edge, so
@@ -1752,8 +1777,9 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         let End::Corner { miter: Some(m), .. } = sides[i][side] else {
             return None;
         };
-        // The first bend keeps its own corner (trim, relief, weld, tear).
-        if s < bend_end(i) - EPS {
+        // The first bend keeps its own corner (trim, relief, weld, tear),
+        // but for a constant width.
+        if s < bend_end(i) - EPS && !constant(i, side) {
             return None;
         }
         let k = (0..folds.len())
@@ -1817,6 +1843,20 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         };
         Some((cut.point(ss[0]), cut.point(ss[2]), cut))
     };
+    // A constant width's half circle in the base: from a bend's start on the
+    // miter to its mirror image (the neighbour's), round the far side from
+    // the corner. (to, centre, a point on it.)
+    let half_circle = |end: End, p: P2| -> (P2, P2, P2) {
+        let End::Corner { miter: Some(m), .. } = end else {
+            unreachable!("a constant width corner has its miter")
+        };
+        let to = sub(p, scale(m.plane, 2.0 * dot(sub(p, m.vertex), m.plane)));
+        let centre = scale(add(p, to), 0.5);
+        let r = dist(p, centre);
+        let inward = sub(centre, m.vertex);
+        let inward = scale(inward, 1.0 / dot(inward, inward).sqrt());
+        (to, centre, add(centre, scale(inward, r)))
+    };
     // The later folds of edge i's chain, outward.
     let later = |i: usize| -> Vec<usize> {
         (0..folds.len())
@@ -1827,7 +1867,8 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
     // the end isn't one curve: not built).
     for i in 0..n {
         for side in 0..2 {
-            for k in later(i) {
+            let first = root[i].filter(|_| constant(i, side));
+            for k in later(i).into_iter().chain(first) {
                 let Some((_, _, cut)) = mitered_cut(i, side, k) else {
                     continue;
                 };
@@ -2127,7 +2168,15 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 if let Some(q) = short {
                     outline.line(q);
                 }
+                // On the miter from the bend's start (where the half circle
+                // from the neighbour's ends) to its end.
+                if shape == CornerShape::ConstantWidth {
+                    let (p, q, cut) = mitered_cut(i, 0, root[i].unwrap()).unwrap();
+                    outline.line(p);
+                    outline.curve(q, Curve::Cut(cut));
+                }
                 let pieces = match shape {
+                    CornerShape::ConstantWidth => vec![at(i, f0, be)],
                     // The flange edges run on until they meet.
                     CornerShape::Tear => vec![meet((i + n - 1) % n)],
                     CornerShape::LinearWeld => vec![at(i, b0, st.setback), at(i, f0, be)],
@@ -2222,6 +2271,17 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 turn,
                 ..
             } => {
+                if shape == CornerShape::ConstantWidth {
+                    // Back along the miter to the bend's start, then the half
+                    // circle to the neighbour's (its mirror image).
+                    let (p, q, cut) = mitered_cut(i, 1, root[i].unwrap()).unwrap();
+                    outline.line(at(i, f1, be));
+                    outline.line(q);
+                    outline.curve(p, Curve::Cut(cut));
+                    let (to, centre, via) = half_circle(sides[i][1], p);
+                    outline.arc(to, centre, via);
+                    continue;
+                }
                 let pieces = match shape {
                     CornerShape::Tear => vec![meet(i)],
                     CornerShape::LinearWeld => vec![at(i, f1, be), at(i, b1, st.setback)],
@@ -2322,7 +2382,15 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
                 if let End::Square { q, .. } = end {
                     base_cell.line(q);
                 }
-                base_cell.line(at(i, span(i, &st).0[0], st.setback));
+                if constant(i, 0) {
+                    // The neighbour's bend start, the half circle, this one's.
+                    let (p, _, _) = mitered_cut(i, 0, root[i].unwrap()).unwrap();
+                    let (from, centre, via) = half_circle(sides[i][0], p);
+                    base_cell.line(from);
+                    base_cell.arc(p, centre, via);
+                } else {
+                    base_cell.line(at(i, span(i, &st).0[0], st.setback));
+                }
             }
             _ if prev_runs || prev_square => {}
             (_, Some(p), _, end) if !matches!(end, End::Relief) => {
@@ -2400,14 +2468,14 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
             }
             _ => vec![at(i, t, fold.s0)],
         };
-        let e0 = if corner(0) || run_on(0) {
+        let e0 = if corner(0) || run_on(0) || constant(i, 0) {
             f0
         } else if open(0) {
             st.t0
         } else {
             b0
         };
-        let e1 = if corner(1) || run_on(1) {
+        let e1 = if corner(1) || run_on(1) || constant(i, 1) {
             f1
         } else if open(1) {
             st.t1
@@ -2432,8 +2500,9 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         bend.push(at(i, e1, fold_bend_end));
         bend.extend(start(1, b1));
         let mut bend_arcs = vec![None; bend.len()];
-        // A later bend of a mitered chain: its ends are curves.
-        if fold.parent.is_some() {
+        // A later bend of a mitered chain, or a first one at a constant
+        // width: its ends are curves.
+        if fold.parent.is_some() || constant(i, 0) || constant(i, 1) {
             let (a, c) = (mitered_cut(i, 0, k), mitered_cut(i, 1, k));
             if a.is_some() || c.is_some() {
                 let (p0, q0, c0) = match a {
@@ -2582,14 +2651,18 @@ pub fn layout(spec: &PartSpec) -> Result<Layout, SheetError> {
         let (l0, l1) = (
             if line_on(0) {
                 ends(0, f0)
-            } else if let Some(t) = mitered(i, 0, centre).filter(|_| fold.parent.is_some()) {
+            } else if let Some(t) =
+                mitered(i, 0, centre).filter(|_| fold.parent.is_some() || constant(i, 0))
+            {
                 t
             } else {
                 mid(0, b0, e0)
             },
             if line_on(1) {
                 ends(1, f1)
-            } else if let Some(t) = mitered(i, 1, centre).filter(|_| fold.parent.is_some()) {
+            } else if let Some(t) =
+                mitered(i, 1, centre).filter(|_| fold.parent.is_some() || constant(i, 1))
+            {
                 t
             } else {
                 mid(1, b1, e1)
@@ -4253,6 +4326,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_constant_width_corner_keeps_the_bends_the_gap_apart() {
+        let mut part = obround_corner(4.0, 8.0);
+        part.relief.as_mut().unwrap().corner = Some(crate::spec::CornerRelief {
+            shape: CornerShape::ConstantWidth,
+            size: None,
+            length: None,
+        });
+        let flat = flat_pattern(&part).unwrap();
+        // The bend start lines (x 98, y 58) cross at q; the gap is T = 2, so
+        // the bends start 1 / cos 45 from q along them and a half circle of
+        // radius 1 joins them, centred on the bisector.
+        let (q, h) = ([98.0, 58.0], std::f64::consts::SQRT_2);
+        for p in [[q[0], q[1] - h], [q[0] - h, q[1]]] {
+            assert!(
+                flat.outline.iter().any(|v| dist(*v, p) < 1e-9),
+                "{p:?} not in {:?}",
+                flat.outline
+            );
+        }
+        let centre = [q[0] - h / 2.0, q[1] - h / 2.0];
+        assert!(flat
+            .outline_arcs
+            .iter()
+            .flatten()
+            .filter_map(|c| c.arc())
+            .any(|arc| dist(arc.center, centre) < 1e-9));
+        // Each bend's end is one mitered curve from its start to its flange.
+        let cuts = flat
+            .outline_arcs
+            .iter()
+            .filter(|c| matches!(c, Some(Curve::Cut(_))))
+            .count();
+        assert_eq!(cuts, 2);
+        // Folded, a valid solid of the flat's volume to the exact integral.
+        let brep = crate::fold::fold(&part).unwrap();
+        let (exact, mesh) = (
+            crate::fold::exact_mass(&part).unwrap().volume,
+            crate::fold::mass(&brep, 1e-3).unwrap().volume,
+        );
+        assert!((exact - mesh).abs() < 0.5, "{exact} {mesh}");
     }
 
     #[test]
