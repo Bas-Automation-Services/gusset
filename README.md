@@ -52,10 +52,11 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
 - **Punches:** a shape of holes and cut-outs stamped at several points, turned by an angle,
   in the flat or on a flange's or face's own face; the flat pattern marks each stamp's centre
   and punch ID.
-- **Embosses:** round or rectangular embosses (dimples, ribs, pads) pressed out of any flat
-  plate (the base, a flange, a face), either way, at the sheet's thickness: a drafted or
-  straight wall between two rounded corners, or none where the corners meet, exact (tori,
-  cones, cylinders); the flat pattern marks the footprint.
+- **Embosses:** round or rectangular embosses (pads) pressed out of any flat plate (the base,
+  a flange, a face), either way, at the sheet's thickness: a drafted or straight wall between
+  two rounded corners, or none where the corners meet; domes (a spherical cap) and beads (a
+  cylindrical crown with spherical ends) met straight from the corner. Exact (tori, cones,
+  cylinders, spheres); the flat pattern marks the footprint.
 - **Louvers:** a hood pressed out of any flat plate beside a lance, either way, at the sheet's
   thickness: a quarter round hood (cylinders) with spherical ends, leaving the plate over a
   rounded or sharp corner (tori), closed at the lance by two plane faces; exact. The flat

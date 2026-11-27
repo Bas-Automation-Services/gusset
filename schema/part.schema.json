@@ -861,7 +861,7 @@
       "type": "object",
       "properties": {
         "angle": {
-          "description": "A rectangle's turn, counter-clockwise from the frame's x, degrees.",
+          "description": "A rectangle's or a bead's turn, counter-clockwise from the frame's x,\ndegrees.",
           "type": "number",
           "format": "double",
           "default": 0.0
@@ -975,6 +975,55 @@
           "additionalProperties": false,
           "required": [
             "rectangle"
+          ]
+        },
+        {
+          "description": "A dome: the raised face a spherical cap of inside `radius`, met\nstraight from the corner (no wall, no draft); its size follows from\nthe height, the corner's radius and the crown's.",
+          "type": "object",
+          "properties": {
+            "dome": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "radius"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "dome"
+          ]
+        },
+        {
+          "description": "A bead: the raised face a cylinder of inside `radius` along x (before\nthe turn) with spherical ends, `length` between the ends' centres,\nmet straight from the corner as a dome's.",
+          "type": "object",
+          "properties": {
+            "bead": {
+              "type": "object",
+              "properties": {
+                "length": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "radius": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "length",
+                "radius"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "bead"
           ]
         }
       ]

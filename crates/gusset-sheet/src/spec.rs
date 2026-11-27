@@ -739,7 +739,8 @@ pub struct Emboss {
     /// `up`: towards the frame's normal (x cross y: +z in the flat
     /// pattern), `down`: away from it.
     pub side: Side,
-    /// A rectangle's turn, counter-clockwise from the frame's x, degrees.
+    /// A rectangle's or a bead's turn, counter-clockwise from the frame's x,
+    /// degrees.
     #[serde(default)]
     pub angle: f64,
 }
@@ -831,6 +832,19 @@ pub enum EmbossShape {
         width: f64,
         length: f64,
         corner_radius: f64,
+    },
+    /// A dome: the raised face a spherical cap of inside `radius`, met
+    /// straight from the corner (no wall, no draft); its size follows from
+    /// the height, the corner's radius and the crown's.
+    Dome {
+        radius: f64,
+    },
+    /// A bead: the raised face a cylinder of inside `radius` along x (before
+    /// the turn) with spherical ends, `length` between the ends' centres,
+    /// met straight from the corner as a dome's.
+    Bead {
+        length: f64,
+        radius: f64,
     },
 }
 

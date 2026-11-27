@@ -23,7 +23,7 @@ use opengeometry::brep::{
     GeometryError, Orientation, Surface, SurfaceGeometry, Use,
 };
 use opengeometry::math::Interval;
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, TAU};
 
 const EPS: f64 = 1e-9;
 const Z: P3 = [0.0, 0.0, 1.0];
@@ -114,6 +114,9 @@ enum Plan {
     /// at (-length / 2, 0) and (length / 2, 0), x along the lance and y the
     /// way it opens (the hood at y < 0); turned by `angle` (radians).
     Louver { length: f64, angle: f64 },
+    /// A bead's centre line, `length` along x between its ends' centres,
+    /// turned by `angle` (radians); its section reaches the line.
+    Slot { length: f64, angle: f64 },
 }
 
 /// Where a louver's section meets its lance.
@@ -158,12 +161,21 @@ pub(crate) struct Formed {
     top: f64,
     /// A louver's lance.
     lance: Option<Lance>,
+    /// A dome's or a bead's: the section ends in the crown at the centre
+    /// (line), no raised plane face.
+    crowned: bool,
 }
 
 impl Formed {
     pub fn new(e: &Emboss, t: f64, bend_radius: f64) -> Result<Formed, SheetError> {
         let invalid = |what: &str| Err(SheetError::Invalid(format!("emboss {}: {what}", e.id)));
         let (plan, rc) = match e.shape {
+            EmbossShape::Dome { radius } => {
+                return Formed::crowned(e, t, bend_radius, radius, None)
+            }
+            EmbossShape::Bead { length, radius } => {
+                return Formed::crowned(e, t, bend_radius, radius, Some(length))
+            }
             EmbossShape::Round { diameter } => (Plan::Round(diameter / 2.0), diameter / 2.0),
             EmbossShape::Rectangle {
                 width,
@@ -251,6 +263,75 @@ impl Formed {
             foot,
             top,
             lance: None,
+            crowned: false,
+        })
+    }
+
+    /// A dome (no length) or a bead: from the footprint over the corner
+    /// straight into the crown, an arc of inside radius `crown` reaching the
+    /// centre (line). Worked out rising, s from the centre (line).
+    fn crowned(
+        e: &Emboss,
+        t: f64,
+        bend_radius: f64,
+        crown: f64,
+        length: Option<f64>,
+    ) -> Result<Formed, SheetError> {
+        let invalid = |what: &str| Err(SheetError::Invalid(format!("emboss {}: {what}", e.id)));
+        let (r, h) = (e.radius.unwrap_or(bend_radius), e.height);
+        if !(h > 0.0 && r > 0.0 && crown > 0.0 && length.is_none_or(|l| l > 0.0)) {
+            return invalid("needs a positive height, radius, crown radius and length");
+        }
+        if e.draft != 0.0 {
+            return invalid("a dome or a bead has no wall to draft");
+        }
+        // The corner around c1 over the plate's face at T (inside r on that
+        // face), the crown around its centre on the axis at zc (inside on
+        // the face at z = 0), outermost at T + h; the two touch.
+        let (c1z, zc) = (t + r, h - crown);
+        let d = crown + r + t;
+        if !(zc < c1z - EPS) {
+            return invalid("too high for its crown: it would turn back under itself");
+        }
+        let foot = (d * d - (c1z - zc).powi(2)).sqrt();
+        let (c1, cc) = ([foot, c1z], [0.0, zc]);
+        let bend = (zc - c1z).atan2(-foot) + TAU;
+        let cap = (c1z - zc).atan2(foot);
+        let arc = |c: P2, rho: f64, a0: f64, a1: f64| Meridian::Arc { c, rho, a0, a1 };
+        let up = [
+            vec![
+                arc(c1, r + t, 1.5 * PI, bend),
+                arc(cc, crown, cap, FRAC_PI_2),
+            ],
+            vec![
+                arc(c1, r, 1.5 * PI, bend),
+                arc(cc, crown + t, cap, FRAC_PI_2),
+            ],
+        ];
+        let (chains, tops) = match e.side {
+            Side::Up => (up, [h, t + h]),
+            Side::Down => {
+                let flip = |c: &Vec<Meridian>| c.iter().map(|m| m.mirrored(t)).collect();
+                ([flip(&up[1]), flip(&up[0])], [-h, t - h])
+            }
+        };
+        let plan = match length {
+            None => Plan::Round(0.0),
+            Some(length) => Plan::Slot {
+                length,
+                angle: e.angle.to_radians(),
+            },
+        };
+        Ok(Formed {
+            id: e.id.clone(),
+            center: e.at,
+            plan,
+            chains,
+            tops,
+            foot,
+            top: 0.0,
+            lance: None,
+            crowned: true,
         })
     }
 
@@ -339,6 +420,7 @@ impl Formed {
                 cross,
                 area,
             }),
+            crowned: false,
         })
     }
 
@@ -357,7 +439,7 @@ impl Formed {
                 center: self.center,
                 diameter: 2.0 * (half + self.foot),
             }),
-            Plan::Rect { .. } | Plan::Louver { .. } => None,
+            Plan::Rect { .. } | Plan::Louver { .. } | Plan::Slot { .. } => None,
         }
     }
 
@@ -414,6 +496,22 @@ impl Formed {
                     arcs: vec![None, arc(h), None, None, None, arc(-h)],
                 }
             }
+            // A stadium round the centre line.
+            Plan::Slot { length, .. } => {
+                let (h, a) = (length / 2.0, self.foot);
+                let arc = |x: f64| {
+                    Some(Curve::Arc(Arc {
+                        center: self.place([x, 0.0]),
+                        ccw: true,
+                    }))
+                };
+                Ring {
+                    points: [[-h, -a], [h, -a], [h, a], [-h, a]]
+                        .map(|p| self.place(p))
+                        .to_vec(),
+                    arcs: vec![None, arc(h), None, arc(-h)],
+                }
+            }
         }
     }
 
@@ -422,7 +520,7 @@ impl Formed {
         match self.plan {
             Plan::Round(half) => half,
             Plan::Rect { rc, .. } => rc,
-            Plan::Louver { .. } => 0.0,
+            Plan::Louver { .. } | Plan::Slot { .. } => 0.0,
         }
     }
 
@@ -432,6 +530,7 @@ impl Formed {
             Plan::Round(half) => TAU * (half + s),
             Plan::Rect { hw, hl, rc, .. } => 4.0 * (hw + hl) - 8.0 * rc + TAU * (rc + s),
             Plan::Louver { length, .. } => length + PI * s,
+            Plan::Slot { length, .. } => 2.0 * length + TAU * s,
         }
     }
 
@@ -442,13 +541,15 @@ impl Formed {
             Plan::Rect { hw, hl, rc, .. } => {
                 4.0 * (hw + s) * (hl + s) - (4.0 - PI) * (rc + s).powi(2)
             }
-            Plan::Louver { .. } => 0.0,
+            Plan::Louver { .. } | Plan::Slot { .. } => 0.0,
         }
     }
 
     fn turn(&self) -> f64 {
         match self.plan {
-            Plan::Rect { angle, .. } | Plan::Louver { angle, .. } => angle,
+            Plan::Rect { angle, .. } | Plan::Louver { angle, .. } | Plan::Slot { angle, .. } => {
+                angle
+            }
             Plan::Round(_) => 0.0,
         }
     }
@@ -566,6 +667,7 @@ impl Formed {
                 let w = self.place_dir([0.0, 1.0]);
                 center = [center[0] - back * w[0], center[1] - back * w[1]];
             }
+            _ if self.crowned => {}
             _ => {
                 let slab = self.plan_area(self.top);
                 let t = (self.tops[1] - self.tops[0]).abs();
@@ -597,13 +699,19 @@ impl Formed {
         };
         let [cx, cy] = self.center;
         for level in 0..2 {
-            let shift = |c: &Vec<Meridian>| c.iter().map(|m| m.shifted(half)).collect::<Vec<_>>();
+            let shift = |c: &Vec<Meridian>| {
+                self.split(c)
+                    .iter()
+                    .map(|m| m.shifted(half))
+                    .collect::<Vec<_>>()
+            };
             let chain = shift(&self.chains[level]);
             let other = shift(&self.chains[1 - level]);
             // Circles and their vertices where the pieces meet, from the
             // footprint inward.
             let mut rings = vec![(circles[level], v[level])];
-            for m in &chain {
+            let banded = chain.len() - usize::from(self.crowned);
+            for m in &chain[..banded] {
                 let q = m.at(1.0).0;
                 let vertex = b.vertex([cx + q[0], cy, q[1]]);
                 let circle = b.edge(
@@ -625,6 +733,31 @@ impl Formed {
                 // Outward: away from the other face.
                 let (here, there) = (m.at(0.5).0, other[i].at(0.5).0);
                 let out = [here[0] - there[0], here[1] - there[1]];
+                if i == banded {
+                    // The crown: a cap inside the last circle.
+                    let Meridian::Arc { c, rho, a1, .. } = *m else {
+                        unreachable!("a crown is an arc")
+                    };
+                    let up = a1.sin().signum();
+                    let (surface, samples) =
+                        crown_sphere([cx, cy, c[1]], [0.0, 1.0, 0.0], up, rho, |f, g| {
+                            let q = m.at(g).0;
+                            let a = f * TAU;
+                            [cx + q[0] * a.cos(), cy + q[0] * a.sin(), q[1]]
+                        });
+                    let (circle, vertex) = rings[i];
+                    let q = m.at(0.5).0;
+                    louver_face(
+                        b,
+                        &format!("{}.{level}.cap", self.id),
+                        surface,
+                        &[(circle, vertex, vertex, vertex)],
+                        &samples,
+                        [cx + q[0], cy, q[1]],
+                        [out[0], 0.0, out[1]],
+                    )?;
+                    continue;
+                }
                 self.band(
                     b,
                     &format!("{}.{level}.{i}", self.id),
@@ -633,6 +766,9 @@ impl Formed {
                     rings[i],
                     rings[i + 1],
                 )?;
+            }
+            if self.crowned {
+                continue;
             }
             // The raised face.
             let up = (self.tops[level] - self.tops[1 - level]).signum();
@@ -674,15 +810,22 @@ impl Formed {
         // end a.
         let (surface, (u0, du), [ha, hb], seam, seam_v, forward) = match m {
             Meridian::Arc { c, rho, a0, a1 } => {
-                let surface = SurfaceGeometry::Torus {
-                    frame: Frame3 {
-                        origin: [cx, cy, c[1]],
-                        x,
-                        y: [0.0, 1.0, 0.0],
-                        z: Z,
-                    },
-                    major_radius: c[0],
-                    minor_radius: rho,
+                let frame = Frame3 {
+                    origin: [cx, cy, c[1]],
+                    x,
+                    y: [0.0, 1.0, 0.0],
+                    z: Z,
+                };
+                // About the axis itself (a dome's crown): a sphere, its
+                // latitude the arc's angle.
+                let surface = if c[0].abs() < EPS {
+                    SurfaceGeometry::Sphere { frame, radius: rho }
+                } else {
+                    SurfaceGeometry::Torus {
+                        frame,
+                        major_radius: c[0],
+                        minor_radius: rho,
+                    }
                 };
                 let seam = b.edge(
                     CurveGeometry::Circle {
@@ -766,12 +909,321 @@ impl Formed {
         vertices: [Vec<u32>; 2],
         edges: [Vec<(u32, u32)>; 2],
     ) -> Result<(), GeometryError> {
-        if let Plan::Louver { .. } = self.plan {
-            return self.build_louver(b, m, vertices, edges);
+        match self.plan {
+            Plan::Louver { .. } => return self.build_louver(b, m, vertices, edges),
+            Plan::Slot { .. } => return self.build_slot(b, m, vertices, edges),
+            _ => {}
         }
         let vertices = std::array::from_fn(|l| std::array::from_fn(|j| vertices[l][j]));
         let edges = std::array::from_fn(|l| std::array::from_fn(|j| edges[l][j]));
         self.build_rect(b, m, vertices, edges)
+    }
+
+    /// A section to build: a crown whose edge lies low on its sphere in two,
+    /// a band up to 60 degrees and the cap, so the cap's edge stays clear of
+    /// its sphere's poles.
+    fn split(&self, c: &[Meridian]) -> Vec<Meridian> {
+        let mut c = c.to_vec();
+        if let Some(&Meridian::Arc { c: k, rho, a0, a1 }) = c.last() {
+            if self.crowned && a0.abs() < FRAC_PI_4 {
+                let mid = a1.signum() * FRAC_PI_3;
+                c.pop();
+                c.push(Meridian::Arc {
+                    c: k,
+                    rho,
+                    a0,
+                    a1: mid,
+                });
+                c.push(Meridian::Arc {
+                    c: k,
+                    rho,
+                    a0: mid,
+                    a1,
+                });
+            }
+        }
+        c
+    }
+
+    /// Builds a bead's faces: per face of the sheet each piece of its section
+    /// along both sides of the centre line (cylinders) and round each end (a
+    /// half turn: a torus, or a sphere where it turns about the end's axis).
+    /// The crown's sides meet at the centre line.
+    fn build_slot(
+        &self,
+        b: &mut Builder,
+        m: Rigid,
+        vertices: [Vec<u32>; 2],
+        edges: [Vec<(u32, u32)>; 2],
+    ) -> Result<(), GeometryError> {
+        let b = &mut Moved { b, m };
+        let Plan::Slot { length, .. } = self.plan else {
+            unreachable!()
+        };
+        let h = length / 2.0;
+        let (u, w) = (self.place_dir([1.0, 0.0]), self.place_dir([0.0, 1.0]));
+        let o = self.center;
+        // A section point q (s, z) at p along the centre line on side tau
+        // (+1: along w), or on the end at sigma turned phi from side -1.
+        let side = |p: f64, tau: f64, q: P2| -> P3 {
+            [
+                o[0] + p * u[0] + tau * q[0] * w[0],
+                o[1] + p * u[1] + tau * q[0] * w[1],
+                q[1],
+            ]
+        };
+        let end = |sigma: f64, phi: f64, q: P2| -> P3 {
+            let (along, across) = (sigma * (h + q[0] * phi.sin()), -q[0] * phi.cos());
+            [
+                o[0] + along * u[0] + across * w[0],
+                o[1] + along * u[1] + across * w[1],
+                q[1],
+            ]
+        };
+        type Step = (u32, u32, u32, u32);
+        let rev = |path: &[Step]| -> Vec<Step> {
+            path.iter()
+                .rev()
+                .map(|&(e, s, f, t)| (e, s, t, f))
+                .collect()
+        };
+        let signs = [-1.0, 1.0];
+        for level in 0..2 {
+            let chain = &self.split(&self.chains[level]);
+            let other = &self.split(&self.chains[1 - level]);
+            let n = chain.len();
+            let mut qs = vec![chain[0].at(0.0).0];
+            qs.extend(chain.iter().map(|m| m.at(1.0).0));
+            let ring = &vertices[level];
+            // Vertices [sigma][tau][station]; at the last (s = 0) both sides
+            // are one point.
+            let mut at = [
+                [vec![ring[0]], vec![ring[3]]],
+                [vec![ring[1]], vec![ring[2]]],
+            ];
+            for (k, q) in qs.iter().enumerate().skip(1) {
+                for (si, &sigma) in signs.iter().enumerate() {
+                    let a = b.vertex(side(sigma * h, -1.0, *q));
+                    let c = if k == n {
+                        a
+                    } else {
+                        b.vertex(side(sigma * h, 1.0, *q))
+                    };
+                    at[si][0].push(a);
+                    at[si][1].push(c);
+                }
+            }
+            // Lines per side and station, half circles per end and station.
+            let ring_step = |j: usize, from: u32, to: u32| -> Step {
+                (edges[level][j].0, edges[level][j].1, from, to)
+            };
+            let mut lines: [Vec<Step>; 2] = [
+                vec![ring_step(0, at[0][0][0], at[1][0][0])],
+                vec![ring_step(2, at[0][1][0], at[1][1][0])],
+            ];
+            let mut halves: [Vec<Option<Step>>; 2] = [
+                vec![Some(ring_step(3, at[0][0][0], at[0][1][0]))],
+                vec![Some(ring_step(1, at[1][0][0], at[1][1][0]))],
+            ];
+            for (k, q) in qs.iter().enumerate().skip(1) {
+                for (ti, &tau) in signs.iter().enumerate() {
+                    // The crown runs across the centre line: no edge there.
+                    if k == n {
+                        continue;
+                    }
+                    let id = b.edge(
+                        CurveGeometry::Line {
+                            origin: side(-h, tau, *q),
+                            direction: u,
+                        },
+                        Interval::new(0.0, length)?,
+                        false,
+                    );
+                    lines[ti].push((id, at[0][ti][k], at[0][ti][k], at[1][ti][k]));
+                }
+                for (si, &sigma) in signs.iter().enumerate() {
+                    if k == n {
+                        halves[si].push(None);
+                        continue;
+                    }
+                    let x = [-w[0], -w[1], 0.0];
+                    let y = u.map(|v| sigma * v);
+                    let id = b.edge(
+                        CurveGeometry::Circle {
+                            frame: Frame3 {
+                                origin: end(sigma, 0.0, [0.0, q[1]]),
+                                x,
+                                y,
+                                z: cross(x, y),
+                            },
+                            radius: q[0],
+                        },
+                        Interval::new(0.0, PI)?,
+                        false,
+                    );
+                    halves[si].push(Some((id, at[si][0][k], at[si][0][k], at[si][1][k])));
+                }
+            }
+            for (k, piece) in chain.iter().enumerate() {
+                let Meridian::Arc { c, rho, a0, a1 } = *piece else {
+                    unreachable!("a bead's section is arcs")
+                };
+                let (here, there) = (piece.at(0.5).0, other[k].at(0.5).0);
+                let out = [here[0] - there[0], here[1] - there[1]];
+                // Where the sides join the ends: per end and side, an arc in
+                // the plane square to the centre line.
+                let mut join = [[(0, 0, 0, 0); 2]; 2];
+                for (si, &sigma) in signs.iter().enumerate() {
+                    for (ti, &tau) in signs.iter().enumerate() {
+                        let x = w.map(|v| tau * v);
+                        let (from, to) = ((a0, at[si][ti][k]), (a1, at[si][ti][k + 1]));
+                        let (lo, hi) = if from.0 < to.0 {
+                            (from, to)
+                        } else {
+                            (to, from)
+                        };
+                        let id = b.edge(
+                            CurveGeometry::Circle {
+                                frame: Frame3 {
+                                    origin: side(sigma * h, tau, [c[0], c[1]]),
+                                    x,
+                                    y: Z,
+                                    z: cross(x, Z),
+                                },
+                                radius: rho,
+                            },
+                            Interval::new(lo.0, hi.0)?,
+                            false,
+                        );
+                        join[si][ti] = (id, lo.1, from.1, to.1);
+                    }
+                }
+                // The crown: one face across the centre line, its seam on
+                // the far side.
+                if k + 1 == n {
+                    let x = [0.0, 0.0, -a1.sin().signum()];
+                    let surface = SurfaceGeometry::Cylinder {
+                        frame: Frame3 {
+                            origin: side(0.0, 1.0, c),
+                            x,
+                            y: w,
+                            z: cross(x, w),
+                        },
+                        radius: rho,
+                    };
+                    let steps = [
+                        vec![lines[0][k], join[1][0]],
+                        rev(&[lines[1][k], join[1][1]]),
+                        vec![join[0][1]],
+                        rev(&[join[0][0]]),
+                    ]
+                    .concat();
+                    let samples: Vec<P3> = (0..=8)
+                        .flat_map(|i| (0..=16).map(move |j| (i as f64 / 8.0, j as f64 / 16.0)))
+                        .map(|(fp, fq)| {
+                            let (tau, g) = if fq < 0.5 {
+                                (-1.0, 2.0 * fq)
+                            } else {
+                                (1.0, 2.0 - 2.0 * fq)
+                            };
+                            side(-h + fp * length, tau, piece.at(g).0)
+                        })
+                        .collect();
+                    let q = piece.at(1.0).0;
+                    louver_face(
+                        b,
+                        &format!("{}.{level}.crown", self.id),
+                        surface,
+                        &steps,
+                        &samples,
+                        side(0.0, 1.0, q),
+                        [0.0, 0.0, out[1]],
+                    )?;
+                }
+                for (ti, &tau) in signs.iter().enumerate() {
+                    if k + 1 == n {
+                        break;
+                    }
+                    let x = w.map(|v| tau * v);
+                    let surface = SurfaceGeometry::Cylinder {
+                        frame: Frame3 {
+                            origin: side(0.0, tau, c),
+                            x,
+                            y: Z,
+                            z: cross(x, Z),
+                        },
+                        radius: rho,
+                    };
+                    let steps = [
+                        vec![lines[ti][k], join[1][ti]],
+                        rev(&[join[0][ti], lines[ti][k + 1]]),
+                    ]
+                    .concat();
+                    let samples: Vec<P3> = (0..=8)
+                        .flat_map(|i| (0..=8).map(move |j| (i as f64 / 8.0, j as f64 / 8.0)))
+                        .map(|(fp, fq)| side(-h + fp * length, tau, piece.at(fq).0))
+                        .collect();
+                    louver_face(
+                        b,
+                        &format!("{}.{level}.{k}.side{ti}", self.id),
+                        surface,
+                        &steps,
+                        &samples,
+                        side(0.0, tau, piece.at(0.5).0),
+                        [tau * out[0] * w[0], tau * out[0] * w[1], out[1]],
+                    )?;
+                }
+                for (si, &sigma) in signs.iter().enumerate() {
+                    let centre = end(sigma, 0.0, [0.0, c[1]]);
+                    let (surface, samples) = if c[0].abs() > EPS || k + 1 < n {
+                        let x = u.map(|v| sigma * v);
+                        let frame = Frame3 {
+                            origin: centre,
+                            x,
+                            y: cross(Z, x),
+                            z: Z,
+                        };
+                        // A band of the crown's sphere about the end's axis.
+                        let surface = if c[0].abs() > EPS {
+                            SurfaceGeometry::Torus {
+                                frame,
+                                major_radius: c[0],
+                                minor_radius: rho,
+                            }
+                        } else {
+                            SurfaceGeometry::Sphere { frame, radius: rho }
+                        };
+                        let samples: Vec<P3> = (0..=8)
+                            .flat_map(|i| (0..=8).map(move |j| (i as f64 / 8.0, j as f64 / 8.0)))
+                            .map(|(f, g)| end(sigma, f * PI, piece.at(g).0))
+                            .collect();
+                        (surface, samples)
+                    } else {
+                        crown_sphere(centre, w, a1.sin().signum(), rho, |f, g| {
+                            end(sigma, f * PI, piece.at(g).0)
+                        })
+                    };
+                    let mut steps = Vec::new();
+                    steps.extend(halves[si][k]);
+                    steps.push(join[si][1]);
+                    if let Some(q) = halves[si][k + 1] {
+                        steps.extend(rev(&[q]));
+                    }
+                    steps.extend(rev(&[join[si][0]]));
+                    let radial = u.map(|v| sigma * v);
+                    louver_face(
+                        b,
+                        &format!("{}.{level}.{k}.end{si}", self.id),
+                        surface,
+                        &steps,
+                        &samples,
+                        end(sigma, FRAC_PI_2, piece.at(0.5).0),
+                        [out[0] * radial[0], out[0] * radial[1], out[1]],
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Builds a louver's faces: per face of the sheet each piece of its
@@ -1629,6 +2081,33 @@ fn louver_face(
     Ok(())
 }
 
+/// A crown's sphere about `centre`, its poles along `axis` (level with the
+/// centre, off the crown) and its seam on the far side from the crown
+/// (`up`: +1 above the centre); with samples of the crown from `at`.
+fn crown_sphere(
+    centre: P3,
+    axis: P3,
+    up: f64,
+    radius: f64,
+    at: impl Fn(f64, f64) -> P3,
+) -> (SurfaceGeometry, Vec<P3>) {
+    let x = [0.0, 0.0, -up];
+    let surface = SurfaceGeometry::Sphere {
+        frame: Frame3 {
+            origin: centre,
+            x,
+            y: cross(axis, x),
+            z: axis,
+        },
+        radius,
+    };
+    let samples = (0..=16)
+        .flat_map(|i| (0..=8).map(move |j| (i as f64 / 16.0, j as f64 / 8.0)))
+        .map(|(f, g)| at(f, g))
+        .collect();
+    (surface, samples)
+}
+
 fn unit3(a: P3) -> P3 {
     let n = norm(a);
     a.map(|v| v / n)
@@ -1912,6 +2391,144 @@ mod tests {
                     exact.center_of_mass
                 );
             }
+        }
+    }
+
+    /// The reference CAD's dimple and single rib tools on a 200 x 200 plate,
+    /// T 2, pressed down at (100, 100): a dome (crown inside radius 30, 5
+    /// deep, corner inside 8) and a bead along y (crown 14.5, 80 between its
+    /// ends, 4 deep, corner 2). Up mirrors them.
+    #[test]
+    fn domes_and_beads_are_exact_solids() {
+        let part = |shape: &str, height: f64, radius: f64, side: &str| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"id": "d", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
+                    "embosses": [{{"id": "e", "at": [100, 100], "shape": {shape},
+                        "height": {height}, "radius": {radius}, "side": "{side}", "angle": 90}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        let dome = r#"{"dome": {"radius": 30}}"#;
+        let bead = r#"{"bead": {"length": 80, "radius": 14.5}}"#;
+        for (what, shape, height, radius, volume, area, z, faces) in [
+            (
+                "dome",
+                dome,
+                5.0,
+                8.0,
+                80132.906683,
+                81732.906683,
+                0.937962,
+                10,
+            ),
+            (
+                "bead",
+                bead,
+                4.0,
+                2.0,
+                80379.402501,
+                81979.402501,
+                0.860153,
+                20,
+            ),
+        ] {
+            for side in ["down", "up"] {
+                let spec = part(shape, height, radius, side);
+                let exact = crate::fold::exact_mass(&spec).unwrap();
+                assert!(
+                    (exact.volume - volume).abs() < 1e-6,
+                    "{what}: {}",
+                    exact.volume
+                );
+                assert!(
+                    (exact.area - area).abs() < 1e-6,
+                    "{what}: area {}",
+                    exact.area
+                );
+                let want = if side == "down" { z } else { 2.0 - z };
+                let c = exact.center_of_mass;
+                assert!(
+                    (c[0] - 100.0).abs() < 1e-9 && (c[1] - 100.0).abs() < 1e-9,
+                    "{what}: {c:?}"
+                );
+                assert!((c[2] - want).abs() < 1e-6, "{what} {side}: {c:?}");
+                let solid =
+                    crate::fold::fold(&spec).unwrap_or_else(|e| panic!("{what} {side}: {e}"));
+                assert_eq!(solid.topology.faces.len(), faces, "{what} {side}");
+                let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+                let rel = |a: f64, b: f64| (a - b).abs() / b;
+                assert!(
+                    rel(mesh.volume, exact.volume) < 2e-5,
+                    "{what} {side}: {}",
+                    mesh.volume
+                );
+                assert!(
+                    rel(mesh.area, exact.area) < 2e-5,
+                    "{what} {side}: area {}",
+                    mesh.area
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn what_a_dome_or_bead_refuses() {
+        let part = |shape: &str, height: f64, draft: f64| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"id": "d", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
+                    "embosses": [{{"id": "e", "at": [100, 100], "shape": {shape},
+                        "height": {height}, "draft": {draft}, "side": "up"}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        let invalid = |spec: &PartSpec| {
+            matches!(crate::flat::flat_pattern(spec), Err(SheetError::Invalid(_)))
+        };
+        let dome = r#"{"dome": {"radius": 10}}"#;
+        // No wall to draft; so high it would turn back under itself.
+        assert!(invalid(&part(dome, 5.0, 10.0)));
+        assert!(invalid(&part(dome, 15.0, 0.0)));
+        assert!(!invalid(&part(dome, 12.0, 0.0)));
+        // A bead needs a length.
+        assert!(invalid(&part(
+            r#"{"bead": {"length": 0, "radius": 10}}"#,
+            5.0,
+            0.0
+        )));
+    }
+
+    /// A deep dome or bead: the crown's edge low on its sphere, built as a
+    /// band and a cap; still its exact mass.
+    #[test]
+    fn deep_domes_and_beads_split_their_crowns() {
+        for (shape, faces) in [
+            (r#"{"dome": {"radius": 6}}"#, 12),
+            (r#"{"bead": {"length": 30, "radius": 6}}"#, 28),
+        ] {
+            let spec: PartSpec = serde_json::from_str(&format!(
+                r#"{{"id": "d", "thickness": 0.8, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
+                    "embosses": [{{"id": "e", "at": [100, 100], "shape": {shape},
+                        "height": 8, "radius": 4, "side": "down", "angle": 35}}]}}}}"#
+            ))
+            .unwrap();
+            let exact = crate::fold::exact_mass(&spec).unwrap();
+            let solid = crate::fold::fold(&spec).unwrap_or_else(|e| panic!("{shape}: {e}"));
+            assert_eq!(solid.topology.faces.len(), faces, "{shape}");
+            let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+            let rel = |a: f64, b: f64| (a - b).abs() / b;
+            assert!(
+                rel(mesh.volume, exact.volume) < 2e-5,
+                "{shape}: {}",
+                mesh.volume
+            );
+            assert!(
+                rel(mesh.area, exact.area) < 2e-5,
+                "{shape}: area {}",
+                mesh.area
+            );
         }
     }
 
