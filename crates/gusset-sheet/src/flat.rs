@@ -408,7 +408,8 @@ struct Strip {
 enum End {
     /// Flush with a square base edge that carries no flange there.
     Free,
-    /// A partial flange's end: a relief notch.
+    /// A partial flange's end: a relief notch (none for a bend from the edge
+    /// on).
     Relief,
     /// A strip's end next to a base edge that isn't square to it and carries
     /// no flange there, or an arc at an angle to it: the flange ends square
@@ -914,6 +915,12 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
                 relief.width
             };
             if !at_corner {
+                // The bend starts at the edge (bend outside): no base beside
+                // it to relieve, the end runs straight from the edge.
+                if st.setback >= -EPS {
+                    sides[i][side] = End::Relief;
+                    continue;
+                }
                 let remnant = if side == 0 { st.t0 } else { length - st.t1 };
                 // Next to an arc the remnant stays, however short.
                 if base_arcs[neighbour].is_some() && remnant - width < EPS {
@@ -2056,7 +2063,8 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
         ));
     }
     let notch = |path: &mut Path, i: usize, st: &Strip, start: bool, outline: bool| {
-        if relief.shape == ReliefShape::Tear && outline {
+        // A bend from the edge on: no notch.
+        if relief.shape == ReliefShape::Tear && outline || st.setback >= -EPS {
             // Torn, not cut: the flat shows no notch.
             path.line(at(i, if start { st.t0 } else { st.t1 }, 0.0));
             return;

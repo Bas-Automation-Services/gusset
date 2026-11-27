@@ -51,6 +51,19 @@ pub fn section(
     let setback = match flange.position {
         BendPosition::Outside => -r * half_tan,
         BendPosition::Inside => -(r + t) * half_tan - t * cos / sin,
+        BendPosition::BendOutside => 0.0,
+        BendPosition::OuterSharp => -(r + t) * half_tan,
+        // The outer bend face's furthest point: past 90 degrees, R + T out
+        // from the bend's centre.
+        BendPosition::BendTangent => {
+            if theta <= std::f64::consts::FRAC_PI_2 + 1e-9 {
+                return Err(SheetError::Invalid(format!(
+                    "flange {}: bend_tangent needs an angle above 90 degrees",
+                    flange.id
+                )));
+            }
+            -(r + t)
+        }
     };
     let l = flange.length;
     let straight = match flange.datum {
@@ -137,6 +150,32 @@ mod tests {
     fn a_flange_too_short_for_its_bend_is_rejected() {
         let mut f = flange(90.0, HeightDatum::Outer, BendPosition::Outside);
         f.length = 3.0;
+        assert!(section(2.0, 2.0, 0.4, &f).is_err());
+    }
+
+    #[test]
+    fn bend_outside_outer_sharp_and_tangent_setbacks() {
+        // T 2, R 2: the bend's start as the reference CAD puts it.
+        let setback = |angle: f64, position: BendPosition| {
+            section(2.0, 2.0, 0.4, &flange(angle, HeightDatum::Outer, position))
+                .unwrap()
+                .setback
+        };
+        for angle in [45.0, 90.0, 135.0] {
+            assert_eq!(setback(angle, BendPosition::BendOutside), 0.0);
+        }
+        for (angle, s) in [
+            (45.0, -1.656854),
+            (90.0, -4.0),
+            (120.0, -6.928203),
+            (135.0, -9.656854),
+        ] {
+            assert!((setback(angle, BendPosition::OuterSharp) - s).abs() < 1e-6);
+        }
+        for angle in [100.0, 135.0, 160.0] {
+            assert!((setback(angle, BendPosition::BendTangent) + 4.0).abs() < 1e-12);
+        }
+        let f = flange(90.0, HeightDatum::Outer, BendPosition::BendTangent);
         assert!(section(2.0, 2.0, 0.4, &f).is_err());
     }
 }

@@ -404,6 +404,21 @@
           "description": "The flange's inner face is flush with the base edge.",
           "type": "string",
           "const": "outside"
+        },
+        {
+          "description": "The bend starts at the base edge: the base keeps its full size.",
+          "type": "string",
+          "const": "bend_outside"
+        },
+        {
+          "description": "The flange's outer virtual sharp (its outer face's line meeting the\nbase's outer plane) lies on the base edge.",
+          "type": "string",
+          "const": "outer_sharp"
+        },
+        {
+          "description": "The outer bend face touches the plane square to the base through its\nedge: angles above 90 degrees only.",
+          "type": "string",
+          "const": "bend_tangent"
         }
       ]
     },

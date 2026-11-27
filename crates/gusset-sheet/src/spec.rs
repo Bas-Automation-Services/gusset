@@ -1104,6 +1104,14 @@ pub enum BendPosition {
     Inside,
     /// The flange's inner face is flush with the base edge.
     Outside,
+    /// The bend starts at the base edge: the base keeps its full size.
+    BendOutside,
+    /// The flange's outer virtual sharp (its outer face's line meeting the
+    /// base's outer plane) lies on the base edge.
+    OuterSharp,
+    /// The outer bend face touches the plane square to the base through its
+    /// edge: angles above 90 degrees only.
+    BendTangent,
 }
 
 /// Where a partial flange sits on its base edge `a -> b`.
