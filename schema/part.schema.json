@@ -182,6 +182,13 @@
             "$ref": "#/$defs/Emboss"
           }
         },
+        "flanged_holes": {
+          "description": "Flanged holes, on the base or any other flat plate.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FlangedHole"
+          }
+        },
         "holes": {
           "description": "Holes in the flat pattern (the base frame, which the flat pattern\nshares): on the base, across or inside a bend, or on a flange. Each\nmust lie inside the flat outline or cross it (a round notch), without\ntouching it, and clear of the others.",
           "type": "array",
@@ -1289,6 +1296,66 @@
         "length",
         "datum",
         "position",
+        "side"
+      ]
+    },
+    "FlangedHole": {
+      "description": "A flanged hole: the sheet round a hole pressed out of a flat plate into a\ncollar. Seen from the side the sheet leaves the plate over a rounded corner\n(`radius` on its inside) and runs along the collar's wall, straight or\ndrafted inwards, to its end, cut square to the wall. The hole's measures\nare its inside wall's: `diameter` where it (extended) meets the plate face\nthe sheet leaves, and `height` from that face to where it ends. The flat\npattern holds the pre-hole: the collar developed along its neutral fibre\n(the corner at the bend's K-factor, then the wall) back into the plate;\nand marks the footprint. The footprint must lie on one plate, clear of\nbends.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "The centre.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "diameter": {
+          "type": "number",
+          "format": "double"
+        },
+        "draft": {
+          "description": "The wall's slope from square to the plate, inwards, degrees: 0 for a\nstraight collar, below 90.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "height": {
+          "type": "number",
+          "format": "double"
+        },
+        "id": {
+          "type": "string"
+        },
+        "on": {
+          "description": "The flange or face whose frame `at` and `side` are in, as for an\nemboss; the flat pattern's when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "radius": {
+          "description": "Inside radius of the corner. Default: the part's bend radius.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "side": {
+          "description": "`up`: the collar rises towards the frame's normal, `down`: away from\nit.",
+          "$ref": "#/$defs/Side"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "at",
+        "diameter",
+        "height",
         "side"
       ]
     },

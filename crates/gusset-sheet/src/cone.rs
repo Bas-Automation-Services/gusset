@@ -1248,6 +1248,7 @@ pub(crate) fn bare(spec: &PartSpec, what: &str) -> Result<(), SheetError> {
         ),
         (!b.embosses.is_empty(), "embosses"),
         (!b.louvers.is_empty(), "louvers"),
+        (!b.flanged_holes.is_empty(), "flanged holes"),
         (spec.bend_table.is_some(), "a bend table"),
     ];
     match features.iter().find(|f| f.0) {

@@ -16,7 +16,7 @@
 
 use crate::flat::{Arc, Curve, Ring, P2};
 use crate::fold::{Mass, Rigid, GAUSS, P3};
-use crate::spec::{Emboss, EmbossShape, Hole, Louver, Side};
+use crate::spec::{Emboss, EmbossShape, FlangedHole, Hole, Louver, Side};
 use crate::SheetError;
 use opengeometry::brep::{
     boundary, plane_boundary, projected_boundary, uv_line, Builder, CurveGeometry, Frame3,
@@ -164,6 +164,9 @@ pub(crate) struct Formed {
     /// A dome's or a bead's: the section ends in the crown at the centre
     /// (line), no raised plane face.
     crowned: bool,
+    /// A flanged hole's: the section ends at the collar's end, square to its
+    /// wall (no raised face); its pre-hole's radius in the flat.
+    open: Option<f64>,
 }
 
 impl Formed {
@@ -264,6 +267,7 @@ impl Formed {
             top,
             lance: None,
             crowned: false,
+            open: None,
         })
     }
 
@@ -332,6 +336,7 @@ impl Formed {
             top: 0.0,
             lance: None,
             crowned: true,
+            open: None,
         })
     }
 
@@ -421,6 +426,99 @@ impl Formed {
                 area,
             }),
             crowned: false,
+            open: None,
+        })
+    }
+
+    /// A flanged hole: from the footprint over the corner along the collar's
+    /// wall to its end, cut square to the wall. Worked out rising, s from the
+    /// axis: the inside wall (the face leaving z = 0) meets z = 0 at d / 2.
+    pub fn flanged(
+        h: &FlangedHole,
+        t: f64,
+        bend_radius: f64,
+        k: f64,
+    ) -> Result<Formed, SheetError> {
+        let invalid = |what: &str| {
+            Err(SheetError::Invalid(format!(
+                "flanged hole {}: {what}",
+                h.id
+            )))
+        };
+        let (r, d) = (h.radius.unwrap_or(bend_radius), h.draft.to_radians());
+        if !(h.diameter > 0.0 && h.height > 0.0 && r >= 0.0) {
+            return invalid("needs a positive diameter and height, and a radius of 0 or more");
+        }
+        if !(d >= 0.0 && d < FRAC_PI_2) {
+            return invalid("the draft must lie between 0 and 90 degrees");
+        }
+        // The inside wall: (d / 2 - u sin, u cos) for u along it; its normal
+        // out from the axis n. The corner's centre lies r + T off it, at
+        // z = T + r; the wall's end at z = height, the end face T along n.
+        let (sn, cs) = d.sin_cos();
+        let n = [cs, sn];
+        let wall = |u: f64| [h.diameter / 2.0 - u * sn, u * cs];
+        let u0 = (t + r) * (1.0 - sn) / cs;
+        let u1 = h.height / cs;
+        if !(u1 > u0 + EPS) {
+            return invalid("too low for its radius and thickness: no wall");
+        }
+        let end = wall(u1);
+        if !(end[0] > EPS) {
+            return invalid("its wall closes the hole before it ends");
+        }
+        let at = wall(u0);
+        let c1 = [at[0] + (r + t) * n[0], t + r];
+        let off = |p: P2, by: f64| [p[0] + by * n[0], p[1] + by * n[1]];
+        let corner = |rho: f64| Meridian::Arc {
+            c: c1,
+            rho,
+            a0: 1.5 * PI,
+            a1: PI + d,
+        };
+        let up = [
+            vec![corner(r + t), Meridian::Line { a: at, b: end }],
+            vec![
+                corner(r),
+                Meridian::Line {
+                    a: off(at, t),
+                    b: off(end, t),
+                },
+            ],
+        ];
+        // The pre-hole: the collar along its neutral fibre, unrolled from the
+        // footprint inwards.
+        let developed = (r + k * t) * (FRAC_PI_2 - d) + (u1 - u0);
+        let pre = c1[0] - developed;
+        if !(pre > EPS) {
+            return invalid("too tall to develop from the plate: no pre-hole is left");
+        }
+        let (chains, tops) = match h.side {
+            Side::Up => (up, [0.0; 2]),
+            Side::Down => {
+                let flip = |c: &Vec<Meridian>| c.iter().map(|m| m.mirrored(t)).collect();
+                ([flip(&up[1]), flip(&up[0])], [0.0; 2])
+            }
+        };
+        Ok(Formed {
+            id: h.id.clone(),
+            center: h.at,
+            plan: Plan::Round(0.0),
+            chains,
+            tops,
+            foot: c1[0],
+            top: 0.0,
+            lance: None,
+            crowned: false,
+            open: Some(pre),
+        })
+    }
+
+    /// A flanged hole's pre-hole in the flat pattern.
+    pub fn pre_hole(&self) -> Option<Hole> {
+        self.open.map(|r| Hole {
+            center: self.center,
+            diameter: 2.0 * r,
         })
     }
 
@@ -428,6 +526,7 @@ impl Formed {
     pub fn what(&self) -> String {
         match self.plan {
             Plan::Louver { .. } => format!("louver {}", self.id),
+            _ if self.open.is_some() => format!("flanged hole {}", self.id),
             _ => format!("emboss {}", self.id),
         }
     }
@@ -668,6 +767,15 @@ impl Formed {
                 center = [center[0] - back * w[0], center[1] - back * w[1]];
             }
             _ if self.crowned => {}
+            _ if self.open.is_some() => {
+                // The end face, square to the wall.
+                let (p, q) = (self.chains[0].last(), self.chains[1].last());
+                let (p, q) = (
+                    p.expect("a section").at(1.0).0,
+                    q.expect("a section").at(1.0).0,
+                );
+                area += length_moment(Meridian::Line { a: p, b: q }, p0, turn);
+            }
             _ => {
                 let slab = self.plan_area(self.top);
                 let t = (self.tops[1] - self.tops[0]).abs();
@@ -698,6 +806,8 @@ impl Formed {
             unreachable!()
         };
         let [cx, cy] = self.center;
+        // A collar's last circle per level, and its section point.
+        let mut ends: Vec<((u32, u32), P2)> = Vec::new();
         for level in 0..2 {
             let shift = |c: &Vec<Meridian>| {
                 self.split(c)
@@ -711,7 +821,14 @@ impl Formed {
             // footprint inward.
             let mut rings = vec![(circles[level], v[level])];
             let banded = chain.len() - usize::from(self.crowned);
+            // A sharp corner (no radius) is no face: its two circles are one.
+            let sharp = |m: &Meridian| matches!(m, Meridian::Arc { rho, .. } if *rho < EPS);
             for m in &chain[..banded] {
+                if sharp(m) {
+                    let last = *rings.last().expect("the footprint's circle");
+                    rings.push(last);
+                    continue;
+                }
                 let q = m.at(1.0).0;
                 let vertex = b.vertex([cx + q[0], cy, q[1]]);
                 let circle = b.edge(
@@ -730,6 +847,9 @@ impl Formed {
                 rings.push((circle, vertex));
             }
             for (i, m) in chain.iter().enumerate() {
+                if sharp(m) {
+                    continue;
+                }
                 // Outward: away from the other face.
                 let (here, there) = (m.at(0.5).0, other[i].at(0.5).0);
                 let out = [here[0] - there[0], here[1] - there[1]];
@@ -770,6 +890,10 @@ impl Formed {
             if self.crowned {
                 continue;
             }
+            if self.open.is_some() {
+                ends.push((rings[chain.len()], chain[chain.len() - 1].at(1.0).0));
+                continue;
+            }
             // The raised face.
             let up = (self.tops[level] - self.tops[1 - level]).signum();
             let frame = Frame3 {
@@ -787,6 +911,55 @@ impl Formed {
                 [[-r, r]; 2],
                 vec![use_],
             )?;
+        }
+
+        // A collar's end: a ring (a plane, or a cone round a drafted wall)
+        // between the two levels' last circles.
+        if let [(ring_a, a), (ring_b, e)] = ends[..] {
+            let up = (e[1] - a[1]).abs() > EPS;
+            if up {
+                // Outward: away from the material, along the wall.
+                let (ma, mb) = (self.chains[0].last(), self.chains[1].last());
+                let along = ma.expect("a section").at(1.0).1;
+                let len = along[0].hypot(along[1]);
+                let out = [along[0] / len, along[1] / len];
+                let _ = mb;
+                self.band(
+                    b,
+                    &format!("{}.end", self.id),
+                    Meridian::Line { a, b: e },
+                    out,
+                    ring_a,
+                    ring_b,
+                )?;
+            } else {
+                let z = a[1];
+                let along = self.chains[0].last().expect("a section").at(1.0).1;
+                let sense = along[1].signum();
+                let frame = Frame3 {
+                    origin: [cx, cy, z],
+                    x: [1.0, 0.0, 0.0],
+                    y: [0.0, sense, 0.0],
+                    z: [0.0, 0.0, sense],
+                };
+                let (outer, inner) = if a[0] > e[0] {
+                    (ring_a, ring_b)
+                } else {
+                    (ring_b, ring_a)
+                };
+                let outer_use =
+                    b.plane_boundary(frame, outer.0, outer.1, outer.1, Orientation::Forward)?;
+                let inner_use =
+                    b.plane_boundary(frame, inner.0, inner.1, inner.1, Orientation::Reverse)?;
+                let r = a[0].max(e[0]) + 1.0;
+                b.face_with_holes(
+                    &format!("{}.end", self.id),
+                    SurfaceGeometry::Plane { frame },
+                    [[-r, r]; 2],
+                    vec![outer_use],
+                    vec![vec![inner_use]],
+                )?;
+            }
         }
         Ok(())
     }
@@ -1932,6 +2105,18 @@ impl Moved<'_> {
         self.b.set_face_sense(face, sense)
     }
 
+    fn face_with_holes(
+        &mut self,
+        key: &str,
+        surface: SurfaceGeometry,
+        bounds: [[f64; 2]; 2],
+        outer: Vec<Use>,
+        holes: Vec<Vec<Use>>,
+    ) -> Result<u32, GeometryError> {
+        let surface = self.surface(&surface);
+        self.b.face_with_holes(key, surface, bounds, outer, holes)
+    }
+
     fn plane_boundary(
         &self,
         frame: Frame3,
@@ -2527,6 +2712,134 @@ mod tests {
             assert!(
                 rel(mesh.area, exact.area) < 2e-5,
                 "{shape}: area {}",
+                mesh.area
+            );
+        }
+    }
+
+    /// The reference CAD's round flange and counter sink emboss tools on a
+    /// 200 x 200 plate, T 2, pressed down at (100, 100): a straight collar
+    /// (inside diameter 12.7, 4 high, corner 0.5) and one drafted 20 degrees
+    /// (12 at the top face, 5 high, corner 2). Up mirrors them.
+    #[test]
+    fn flanged_holes_are_exact_solids() {
+        let part = |hole: &str, side: &str| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"id": "h", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
+                    "flanged_holes": [{{"id": "c", "at": [100, 100], {hole}, "side": "{side}"}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        let straight = r#""diameter": 12.7, "height": 4, "radius": 0.5"#;
+        let drafted = r#""diameter": 12, "height": 5, "radius": 2, "draft": 20"#;
+        for (what, hole, volume, area, z) in [
+            ("straight", straight, 79876.004328, 81559.989571, 0.995),
+            ("drafted", drafted, 80017.298994, 81676.12454, 0.990825),
+        ] {
+            for side in ["down", "up"] {
+                let spec = part(hole, side);
+                let exact = crate::fold::exact_mass(&spec).unwrap();
+                assert!(
+                    (exact.volume - volume).abs() < 1e-6,
+                    "{what}: {}",
+                    exact.volume
+                );
+                assert!(
+                    (exact.area - area).abs() < 1e-6,
+                    "{what}: area {}",
+                    exact.area
+                );
+                let want = if side == "down" { z } else { 2.0 - z };
+                assert!(
+                    (exact.center_of_mass[2] - want).abs() < 1e-6,
+                    "{what} {side}: {:?}",
+                    exact.center_of_mass
+                );
+                let solid =
+                    crate::fold::fold(&spec).unwrap_or_else(|e| panic!("{what} {side}: {e}"));
+                assert_eq!(solid.topology.faces.len(), 11, "{what} {side}");
+                let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+                let rel = |a: f64, b: f64| (a - b).abs() / b;
+                assert!(
+                    rel(mesh.volume, exact.volume) < 2e-5,
+                    "{what} {side}: {}",
+                    mesh.volume
+                );
+                assert!(
+                    rel(mesh.area, exact.area) < 2e-5,
+                    "{what} {side}: area {}",
+                    mesh.area
+                );
+            }
+        }
+        // The flat: the pre-hole (the straight collar developed at K 0.4:
+        // 8.85 less 1.3 pi / 2 and the 1.5 wall), the footprint marked.
+        let f = crate::flat::flat_pattern(&part(straight, "down")).unwrap();
+        assert_eq!(f.holes.len(), 1);
+        let pre = 2.0 * (8.85 - 1.3 * std::f64::consts::FRAC_PI_2 - 1.5);
+        assert!(
+            (f.holes[0].diameter - pre).abs() < 1e-9,
+            "{}",
+            f.holes[0].diameter
+        );
+        assert_eq!(f.forms.len(), 1);
+    }
+
+    #[test]
+    fn what_a_flanged_hole_refuses() {
+        let part = |hole: &str| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"id": "h", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
+                    "flanged_holes": [{{"id": "c", "at": [100, 100], {hole}, "side": "up"}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        let invalid = |spec: &PartSpec| {
+            matches!(crate::flat::flat_pattern(spec), Err(SheetError::Invalid(_)))
+        };
+        // No wall above the corner; a wall closing the hole; too tall to
+        // develop from the plate.
+        assert!(invalid(&part(
+            r#""diameter": 12, "height": 3, "radius": 2"#
+        )));
+        assert!(invalid(&part(
+            r#""diameter": 6, "height": 20, "radius": 1, "draft": 20"#
+        )));
+        assert!(invalid(&part(
+            r#""diameter": 6, "height": 20, "radius": 1"#
+        )));
+        assert!(!invalid(&part(
+            r#""diameter": 6, "height": 6, "radius": 1"#
+        )));
+    }
+
+    /// A collar with a sharp inside corner (radius 0): that corner is an
+    /// edge, not a face.
+    #[test]
+    fn a_sharp_flanged_hole() {
+        for (draft, side, faces) in [(0.0, "down", 10), (15.0, "up", 10)] {
+            let spec: PartSpec = serde_json::from_str(&format!(
+                r#"{{"id": "h", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
+                    "flanged_holes": [{{"id": "c", "at": [100, 100], "diameter": 20, "height": 6,
+                        "radius": 0, "draft": {draft}, "side": "{side}"}}]}}}}"#
+            ))
+            .unwrap();
+            let exact = crate::fold::exact_mass(&spec).unwrap();
+            let solid = crate::fold::fold(&spec).unwrap_or_else(|e| panic!("{side}: {e}"));
+            assert_eq!(solid.topology.faces.len(), faces, "{side}");
+            let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+            let rel = |a: f64, b: f64| (a - b).abs() / b;
+            assert!(
+                rel(mesh.volume, exact.volume) < 2e-5,
+                "{side}: {}",
+                mesh.volume
+            );
+            assert!(
+                rel(mesh.area, exact.area) < 2e-5,
+                "{side}: area {}",
                 mesh.area
             );
         }

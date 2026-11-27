@@ -2831,6 +2831,13 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
             };
             crate::emboss::Formed::louver(&placed, spec.thickness, spec.bend_radius)
         }))
+        .chain(spec.base.flanged_holes.iter().map(|h| {
+            let placed = match &h.on {
+                Some(on) => h.placed(&face(on, &format!("flanged hole {}", h.id))?.0),
+                None => h.clone(),
+            };
+            crate::emboss::Formed::flanged(&placed, spec.thickness, spec.bend_radius, spec.k_factor)
+        }))
         .collect::<Result<Vec<_>, _>>()?;
     let mut punches = Vec::new();
     for p in &spec.base.punches {
@@ -2941,6 +2948,13 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
     }
     crate::cut::cut_holes(&mut layout, &[inside.clone(), discs.clone()].concat())?;
     crate::cut::cut_cutouts(&mut layout)?;
+    // A flanged hole's pre-hole is the flat's (the cells keep the footprint).
+    let pre: Vec<Hole> = layout
+        .embosses
+        .iter()
+        .filter_map(|e| e.pre_hole())
+        .collect();
+    layout.flat.holes.extend(pre);
     let rings: Vec<(String, Ring)> = layout
         .embosses
         .iter()

@@ -707,6 +707,9 @@ pub struct Base {
     /// Louvers, on the base or any other flat plate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub louvers: Vec<Louver>,
+    /// Flanged holes, on the base or any other flat plate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flanged_holes: Vec<FlangedHole>,
 }
 
 /// An emboss: the sheet pressed out of a flat plate at its thickness,
@@ -814,6 +817,57 @@ impl Louver {
             };
         }
         l
+    }
+}
+
+/// A flanged hole: the sheet round a hole pressed out of a flat plate into a
+/// collar. Seen from the side the sheet leaves the plate over a rounded corner
+/// (`radius` on its inside) and runs along the collar's wall, straight or
+/// drafted inwards, to its end, cut square to the wall. The hole's measures
+/// are its inside wall's: `diameter` where it (extended) meets the plate face
+/// the sheet leaves, and `height` from that face to where it ends. The flat
+/// pattern holds the pre-hole: the collar developed along its neutral fibre
+/// (the corner at the bend's K-factor, then the wall) back into the plate;
+/// and marks the footprint. The footprint must lie on one plate, clear of
+/// bends.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlangedHole {
+    pub id: String,
+    /// The flange or face whose frame `at` and `side` are in, as for an
+    /// emboss; the flat pattern's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// The centre.
+    pub at: [f64; 2],
+    pub diameter: f64,
+    pub height: f64,
+    /// The wall's slope from square to the plate, inwards, degrees: 0 for a
+    /// straight collar, below 90.
+    #[serde(default)]
+    pub draft: f64,
+    /// Inside radius of the corner. Default: the part's bend radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    /// `up`: the collar rises towards the frame's normal, `down`: away from
+    /// it.
+    pub side: Side,
+}
+
+impl FlangedHole {
+    /// The flanged hole in the flat pattern's frame, placed in `frame`, as an
+    /// emboss.
+    pub(crate) fn placed(&self, frame: &Frame2) -> FlangedHole {
+        let mut h = self.clone();
+        h.on = None;
+        h.at = frame.apply(self.at);
+        if frame.mirrored() {
+            h.side = match self.side {
+                Side::Up => Side::Down,
+                Side::Down => Side::Up,
+            };
+        }
+        h
     }
 }
 
