@@ -850,7 +850,7 @@
       ]
     },
     "Emboss": {
-      "description": "An emboss: the sheet pressed out of a flat plate at its thickness,\naround a centre. Seen from the side it rises out of the plate through a\nrounded corner, along a straight wall, and over a second rounded corner\ninto its raised face, `height` above the plate's face on that side. Both\ncorners have `radius` on their inside. The flat pattern keeps the plate\nwhole (the emboss stretches it) and marks the footprint, where the sheet\nleaves the plate. The footprint must lie on one plate, clear of bends.",
+      "description": "An emboss: the sheet pressed out of a flat plate at its thickness,\naround a centre. Seen from the side it rises out of the plate through a\nrounded corner, along a straight wall, and over a second rounded corner\ninto its raised face, `height` above the plate's face on that side. Both\ncorners have `radius` on their inside. At the draft where the corners\nmeet the wall has no length (as forming tools with tangent corners have). The flat pattern keeps the plate\nwhole (the emboss stretches it) and marks the footprint, where the sheet\nleaves the plate. The footprint must lie on one plate, clear of bends.",
       "type": "object",
       "properties": {
         "angle": {

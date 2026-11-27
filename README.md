@@ -54,8 +54,8 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   and punch ID.
 - **Embosses:** round or rectangular embosses (dimples, ribs, pads) pressed out of any flat
   plate (the base, a flange, a face), either way, at the sheet's thickness: a drafted or
-  straight wall between two rounded corners, exact (tori, cones, cylinders); the flat pattern
-  marks the footprint.
+  straight wall between two rounded corners, or none where the corners meet, exact (tori,
+  cones, cylinders); the flat pattern marks the footprint.
 - **Gussets** across a flange's bend: a rib pressed into the bend's inside, its inner face a
   plane across the corner (by depth from the bend or by its legs), a groove behind it, side
   walls square to the bend; any bend angle below 180, up or down, a wall of its own thickness;

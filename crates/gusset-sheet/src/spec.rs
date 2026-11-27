@@ -710,7 +710,8 @@ pub struct Base {
 /// around a centre. Seen from the side it rises out of the plate through a
 /// rounded corner, along a straight wall, and over a second rounded corner
 /// into its raised face, `height` above the plate's face on that side. Both
-/// corners have `radius` on their inside. The flat pattern keeps the plate
+/// corners have `radius` on their inside. At the draft where the corners
+/// meet the wall has no length (as forming tools with tangent corners have). The flat pattern keeps the plate
 /// whole (the emboss stretches it) and marks the footprint, where the sheet
 /// leaves the plate. The footprint must lie on one plate, clear of bends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

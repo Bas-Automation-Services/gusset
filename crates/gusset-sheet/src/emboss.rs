@@ -125,9 +125,9 @@ pub(crate) struct Formed {
     pub center: P2,
     plan: Plan,
     /// Per face of the sheet, by the plate face it leaves (0: z = 0, 1:
-    /// z = T): its section from the footprint inward, and the height of its
-    /// raised face.
-    chains: [[Meridian; 3]; 2],
+    /// z = T): its section from the footprint inward (corner, wall, corner;
+    /// no wall where the corners meet), and the height of its raised face.
+    chains: [Vec<Meridian>; 2],
     tops: [f64; 2],
     /// s where the sheet leaves the plate, and where the raised face starts.
     foot: f64,
@@ -181,12 +181,15 @@ impl Formed {
         let nw = [d.cos(), d.sin()];
         let off = |c: P2, s: f64| [c[0] + s * nw[0], c[1] + s * nw[1]];
         let (a, b) = (off(c1, -r), off(c2, r + t));
-        if (b[1] - a[1]) * d.cos() - (b[0] - a[0]) * d.sin() <= EPS {
+        // The wall's length; none where the corners meet (as tools with
+        // tangent corners have them).
+        let wall = (b[1] - a[1]) * d.cos() - (b[0] - a[0]) * d.sin();
+        if wall < -EPS {
             return invalid("too low for its radius and thickness");
         }
         let corner = |c: P2, rho: f64, a0: f64, a1: f64| Meridian::Arc { c, rho, a0, a1 };
-        let up = [
-            [
+        let mut up = [
+            vec![
                 corner(c1, r + t, 1.5 * PI, PI + d),
                 Meridian::Line {
                     a: off(c1, -(r + t)),
@@ -194,19 +197,24 @@ impl Formed {
                 },
                 corner(c2, r, d, FRAC_PI_2),
             ],
-            [
+            vec![
                 corner(c1, r, 1.5 * PI, PI + d),
                 Meridian::Line { a, b },
                 corner(c2, r + t, d, FRAC_PI_2),
             ],
         ];
+        if wall <= EPS {
+            for chain in &mut up {
+                chain.remove(1);
+            }
+        }
         let (chains, tops) = match e.side {
             Side::Up => (up, [h, t + h]),
             // Mirrored, the face that left z = T leaves z = 0.
-            Side::Down => (
-                [up[1].map(|m| m.mirrored(t)), up[0].map(|m| m.mirrored(t))],
-                [-h, t - h],
-            ),
+            Side::Down => {
+                let flip = |c: &Vec<Meridian>| c.iter().map(|m| m.mirrored(t)).collect();
+                ([flip(&up[1]), flip(&up[0])], [-h, t - h])
+            }
         };
         Ok(Formed {
             id: e.id.clone(),
@@ -383,7 +391,7 @@ impl Formed {
     pub fn mass(&self) -> Mass {
         let p0 = self.perimeter(0.0);
         let (mut volume, mut mz, mut area) = (0.0, 0.0, 0.0);
-        for i in 0..3 {
+        for i in 0..self.chains[0].len() {
             let [p, q] = [self.chains[0][i], self.chains[1][i]];
             // The region between the two pieces: along p, across to q's end,
             // back along q, across to p's start. Green's theorem gives the
@@ -436,8 +444,9 @@ impl Formed {
         };
         let [cx, cy] = self.center;
         for level in 0..2 {
-            let chain = self.chains[level].map(|m| m.shifted(half));
-            let other = self.chains[1 - level].map(|m| m.shifted(half));
+            let shift = |c: &Vec<Meridian>| c.iter().map(|m| m.shifted(half)).collect::<Vec<_>>();
+            let chain = shift(&self.chains[level]);
+            let other = shift(&self.chains[1 - level]);
             // Circles and their vertices where the pieces meet, from the
             // footprint inward.
             let mut rings = vec![(circles[level], v[level])];
@@ -480,7 +489,7 @@ impl Formed {
                 y: [0.0, up, 0.0],
                 z: [0.0, 0.0, up],
             };
-            let (circle, vertex) = rings[3];
+            let (circle, vertex) = rings[chain.len()];
             let use_ = b.plane_boundary(frame, circle, vertex, vertex, Orientation::Forward)?;
             let r = half + self.top + 1.0;
             b.face(
@@ -609,8 +618,8 @@ impl Formed {
             unreachable!()
         };
         for level in 0..2 {
-            let chain = self.chains[level];
-            let other = self.chains[1 - level];
+            let chain = &self.chains[level];
+            let other = &self.chains[1 - level];
             // Section points where the pieces meet, from the footprint in.
             let qs: Vec<P2> = std::iter::once(chain[0].at(0.0).0)
                 .chain(chain.iter().map(|m| m.at(1.0).0))
@@ -768,8 +777,9 @@ impl Formed {
             };
             let mut uses = Vec::new();
             for j in 0..8 {
-                let (id, start) = rings[3][j];
-                let (from, to) = (vs[3][j], vs[3][(j + 1) % 8]);
+                let last = chain.len();
+                let (id, start) = rings[last][j];
+                let (from, to) = (vs[last][j], vs[last][(j + 1) % 8]);
                 let sense = if from == start {
                     Orientation::Forward
                 } else {
@@ -1108,6 +1118,48 @@ mod tests {
         assert_eq!(f.forms.len(), 1);
     }
 
+    /// A drafted wall of no length: the corners meet. The reference CAD's
+    /// circular emboss tool on T 2: inside radii 3, 5 deep, the corners
+    /// tangent (draft asin 3/8), the raised face r 22 at its inside.
+    #[test]
+    fn corners_that_meet_leave_no_wall() {
+        let draft = (3.0f64 / 8.0).asin().to_degrees();
+        let diameter = 44.0 + 50.0 / 55f64.sqrt();
+        let tool = |side: &str| {
+            format!(
+                r#"{{"id": "c", "at": [50, 30], "shape": {{"round": {{"diameter": {diameter}}}}},
+                "height": 5, "draft": {draft}, "radius": 3, "side": "{side}"}}"#
+            )
+        };
+        exact_solid(&[(tool("down"), "down"), (tool("up"), "up")]);
+        let spec = part(&tool("down"), "");
+        let m = crate::fold::exact_mass(&spec).unwrap();
+        assert!((m.volume - 12670.343650).abs() < 1e-6, "{}", m.volume);
+        assert!((m.area - 13310.343650).abs() < 1e-6, "{}", m.area);
+        assert!(
+            (m.center_of_mass[2] + 0.773639).abs() < 1e-6,
+            "{:?}",
+            m.center_of_mass
+        );
+        let solid = crate::fold::fold(&spec).unwrap();
+        assert_eq!(solid.topology.faces.len(), 12);
+        exact_solid(&[
+            (rect_tangent(5.0, 3.0, "up"), "rectangle up"),
+            (rect_tangent(5.0, 3.0, "down"), "rectangle down"),
+        ]);
+    }
+
+    /// A rectangle whose corners meet, for height h and inside radius r on
+    /// T 2: the draft where the wall's length comes to nothing.
+    fn rect_tangent(h: f64, r: f64, side: &str) -> String {
+        // The corners' centres are 2r + T apart, (2r + T - h) apart in z.
+        let d = ((2.0 * r + 2.0 - h) / (2.0 * r + 2.0)).asin().to_degrees();
+        format!(
+            r#"{{"id": "r", "at": [50, 30], "shape": {{"rectangle": {{"width": 50, "length": 36,
+            "corner_radius": 16}}}}, "height": {h}, "draft": {d}, "radius": {r}, "side": "{side}"}}"#
+        )
+    }
+
     #[test]
     fn a_rectangular_emboss_is_an_exact_solid() {
         exact_solid(&[
@@ -1131,9 +1183,10 @@ mod tests {
                 Err(SheetError::Invalid(_))
             )
         };
-        // Too small across for its corners, too low, across the outline.
+        // Too small across for its corners, too low (at 3 its corners just
+        // meet), across the outline.
         assert!(invalid(&round([50.0, 30.0], 8.0, 6.0, 30.0, "up"), ""));
-        assert!(invalid(&round([50.0, 30.0], 30.0, 3.0, 30.0, "up"), ""));
+        assert!(invalid(&round([50.0, 30.0], 30.0, 2.5, 30.0, "up"), ""));
         assert!(invalid(&round([50.0, 10.0], 30.0, 6.0, 30.0, "up"), ""));
         // Plan corners too tight for the section, or past half a side; and
         // a rectangle across the outline.
