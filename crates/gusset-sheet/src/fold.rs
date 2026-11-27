@@ -703,8 +703,9 @@ impl<'a> Model<'a> {
                 edges.insert((k, level), e);
             }
         }
-        // Rectangular embosses' footprints: no walls there, the formed sheet
-        // goes on from their edges. Each one's ring point ids and flat edges.
+        // Rectangular embosses' and louvers' footprints: no walls there, the
+        // formed sheet goes on from their edges. Each one's ring point ids
+        // and flat edges.
         let footprints: Vec<(usize, Vec<usize>, Vec<EdgeKey>)> = self
             .layout
             .embosses
@@ -1212,15 +1213,17 @@ impl<'a> Model<'a> {
 
         for (i, pids, keys) in &footprints {
             let vertices =
-                std::array::from_fn(|level| std::array::from_fn(|j| vertex[pids[j]][level]));
+                std::array::from_fn(|level| pids.iter().map(|&p| vertex[p][level]).collect());
             let rings = std::array::from_fn(|level| {
-                std::array::from_fn(|j| {
-                    let e = edges[&(keys[j], level)];
-                    (e.id, e.start)
-                })
+                keys.iter()
+                    .map(|k| {
+                        let e = edges[&(*k, level)];
+                        (e.id, e.start)
+                    })
+                    .collect()
             });
             let e = &self.layout.embosses[*i];
-            e.build_rect(&mut b, self.emboss_rigid(e), vertices, rings)?;
+            e.build_ring(&mut b, self.emboss_rigid(e), vertices, rings)?;
         }
 
         // Gussets: the rib's inner face and side walls on the inner level's

@@ -704,6 +704,9 @@ pub struct Base {
     /// Formed embosses, on the base or any other flat plate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub embosses: Vec<Emboss>,
+    /// Louvers, on the base or any other flat plate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub louvers: Vec<Louver>,
 }
 
 /// An emboss: the sheet pressed out of a flat plate at its thickness,
@@ -757,6 +760,59 @@ impl Emboss {
             };
         }
         e
+    }
+}
+
+/// A louver: a hood pressed out of a flat plate beside a lance, a straight
+/// cut it opens at. Seen across the lance, the sheet leaves the plate over a
+/// rounded corner (`bend_radius` on its inside; 0 for a sharp one) and runs
+/// round the hood, a quarter circle of inside radius `radius` about an axis
+/// on the lance in the plate's face it leaves, down to the lance, `radius`
+/// + T past that face. Its ends turn the same section a quarter turn about
+/// axes square to the plate through the hood's ends (spheres, tori). The
+/// flat pattern keeps the plate whole and marks the footprint, the lance one
+/// of its sides. The footprint must lie on one plate, clear of bends.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Louver {
+    pub id: String,
+    /// The flange or face whose frame `at`, `angle` and `side` are in, as
+    /// for an emboss; the flat pattern's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+    /// The hood's middle, on the lance.
+    pub at: [f64; 2],
+    /// The hood's straight length, between its ends' axes.
+    pub length: f64,
+    /// The hood's inside radius, more than the thickness.
+    pub radius: f64,
+    /// Inside radius where the sheet leaves the plate, 0 or more. Default:
+    /// the part's bend radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bend_radius: Option<f64>,
+    /// `up`: the hood rises towards the frame's normal, `down`: away from it.
+    pub side: Side,
+    /// The way it opens, from the hood across the lance: counter-clockwise
+    /// from the frame's x, degrees. The lance runs square to it.
+    #[serde(default)]
+    pub angle: f64,
+}
+
+impl Louver {
+    /// The louver in the flat pattern's frame, placed in `frame`, as an
+    /// emboss.
+    pub(crate) fn placed(&self, frame: &Frame2) -> Louver {
+        let mut l = self.clone();
+        l.on = None;
+        l.at = frame.apply(self.at);
+        l.angle = frame.angle(self.angle);
+        if frame.mirrored() {
+            l.side = match self.side {
+                Side::Up => Side::Down,
+                Side::Down => Side::Up,
+            };
+        }
+        l
     }
 }
 

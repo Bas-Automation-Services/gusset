@@ -2824,6 +2824,13 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
             };
             crate::emboss::Formed::new(&placed, spec.thickness, spec.bend_radius)
         })
+        .chain(spec.base.louvers.iter().map(|l| {
+            let placed = match &l.on {
+                Some(on) => l.placed(&face(on, &format!("louver {}", l.id))?.0),
+                None => l.clone(),
+            };
+            crate::emboss::Formed::louver(&placed, spec.thickness, spec.bend_radius)
+        }))
         .collect::<Result<Vec<_>, _>>()?;
     let mut punches = Vec::new();
     for p in &spec.base.punches {
@@ -2938,11 +2945,11 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
         .embosses
         .iter()
         .filter(|e| e.hole().is_none())
-        .map(|e| (e.id.clone(), e.ring()))
+        .map(|e| (e.what(), e.ring()))
         .collect();
-    for (k, (id, ring)) in rings.iter().enumerate() {
+    for (k, (what, ring)) in rings.iter().enumerate() {
         let others: Vec<Ring> = rings[..k].iter().map(|r| r.1.clone()).collect();
-        crate::cut::cut_inner(&mut layout, ring, &discs, &others, &format!("emboss {id}"))?;
+        crate::cut::cut_inner(&mut layout, ring, &discs, &others, what)?;
     }
     for e in &layout.embosses {
         let held = layout.cells.iter().any(|c| {
@@ -2957,8 +2964,8 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
         });
         if !held {
             return Err(SheetError::Unsupported(format!(
-                "emboss {}: only on one flat plate, clear of bends and cut-outs",
-                e.id
+                "{}: only on one flat plate, clear of bends and cut-outs",
+                e.what()
             )));
         }
     }

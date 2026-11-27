@@ -201,6 +201,13 @@
             }
           ]
         },
+        "louvers": {
+          "description": "Louvers, on the base or any other flat plate.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Louver"
+          }
+        },
         "outline": {
           "description": "Counter-clockwise polygon seen from +z. Edge `i` runs from\n`outline[i]` to `outline[i + 1]` (wrapping). Empty for a profile.",
           "type": "array",
@@ -1617,6 +1624,68 @@
         "top",
         "height",
         "material"
+      ]
+    },
+    "Louver": {
+      "description": "A louver: a hood pressed out of a flat plate beside a lance, a straight\ncut it opens at. Seen across the lance, the sheet leaves the plate over a\nrounded corner (`bend_radius` on its inside; 0 for a sharp one) and runs\nround the hood, a quarter circle of inside radius `radius` about an axis\non the lance in the plate's face it leaves, down to the lance, `radius`\n+ T past that face. Its ends turn the same section a quarter turn about\naxes square to the plate through the hood's ends (spheres, tori). The\nflat pattern keeps the plate whole and marks the footprint, the lance one\nof its sides. The footprint must lie on one plate, clear of bends.",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "description": "The way it opens, from the hood across the lance: counter-clockwise\nfrom the frame's x, degrees. The lance runs square to it.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "at": {
+          "description": "The hood's middle, on the lance.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "bend_radius": {
+          "description": "Inside radius where the sheet leaves the plate, 0 or more. Default:\nthe part's bend radius.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "id": {
+          "type": "string"
+        },
+        "length": {
+          "description": "The hood's straight length, between its ends' axes.",
+          "type": "number",
+          "format": "double"
+        },
+        "on": {
+          "description": "The flange or face whose frame `at`, `angle` and `side` are in, as\nfor an emboss; the flat pattern's when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "radius": {
+          "description": "The hood's inside radius, more than the thickness.",
+          "type": "number",
+          "format": "double"
+        },
+        "side": {
+          "description": "`up`: the hood rises towards the frame's normal, `down`: away from it.",
+          "$ref": "#/$defs/Side"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "at",
+        "length",
+        "radius",
+        "side"
       ]
     },
     "Profile": {

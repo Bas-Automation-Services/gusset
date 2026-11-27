@@ -223,6 +223,11 @@ pub(crate) fn without_faces(spec: &PartSpec) -> Result<PartSpec, SheetError> {
             *e = e.placed(&fr);
         }
     }
+    for l in &mut part.base.louvers {
+        if let Some(fr) = frame(&l.on) {
+            *l = l.placed(&fr);
+        }
+    }
     part.faces = Vec::new();
     part.bends = Vec::new();
     folds.append(&mut part.folds);

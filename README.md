@@ -56,6 +56,10 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   plate (the base, a flange, a face), either way, at the sheet's thickness: a drafted or
   straight wall between two rounded corners, or none where the corners meet, exact (tori,
   cones, cylinders); the flat pattern marks the footprint.
+- **Louvers:** a hood pressed out of any flat plate beside a lance, either way, at the sheet's
+  thickness: a quarter round hood (cylinders) with spherical ends, leaving the plate over a
+  rounded or sharp corner (tori), closed at the lance by two plane faces; exact. The flat
+  pattern marks the footprint, the lance one of its sides.
 - **Gussets** across a flange's bend: a rib pressed into the bend's inside, its inner face a
   plane across the corner (by depth from the bend or by its legs), a groove behind it, side
   walls square to the bend; any bend angle below 180, up or down, a wall of its own thickness;

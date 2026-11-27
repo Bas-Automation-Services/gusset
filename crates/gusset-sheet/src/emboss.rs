@@ -7,10 +7,16 @@
 //! rectangular one runs it along each side (cylinders and a plane) and turns
 //! it around each corner's axis (tori and a cone). All exact. The plate keeps
 //! a hole the shape of the footprint, where the sheet leaves it.
+//!
+//! Louvers (`base.louvers`) are worked out the same way: their section runs
+//! from the footprint over a corner and round the hood down to the lance;
+//! it runs along the hood's straight (cylinders) and turns a quarter turn
+//! round each end's axis (tori, spheres). Two plane faces close it at the
+//! lance.
 
 use crate::flat::{Arc, Curve, Ring, P2};
 use crate::fold::{Mass, Rigid, GAUSS, P3};
-use crate::spec::{Emboss, EmbossShape, Hole, Side};
+use crate::spec::{Emboss, EmbossShape, Hole, Louver, Side};
 use crate::SheetError;
 use opengeometry::brep::{
     boundary, plane_boundary, projected_boundary, uv_line, Builder, CurveGeometry, Frame3,
@@ -104,6 +110,24 @@ enum Plan {
         rc: f64,
         angle: f64,
     },
+    /// A louver's hood, its straight `length` along x between its ends' axes
+    /// at (-length / 2, 0) and (length / 2, 0), x along the lance and y the
+    /// way it opens (the hood at y < 0); turned by `angle` (radians).
+    Louver { length: f64, angle: f64 },
+}
+
+/// Where a louver's section meets its lance.
+#[derive(Clone, Copy, Debug)]
+struct Lance {
+    /// The level of the face that leaves the plate.
+    out: usize,
+    /// Where that face's section crosses the plate's other face: the piece,
+    /// how far along it, and s there.
+    piece: usize,
+    f: f64,
+    cross: f64,
+    /// The two plane faces' area.
+    area: f64,
 }
 
 /// One of a rectangle's eight pieces of outline, counter-clockwise from the
@@ -132,6 +156,8 @@ pub(crate) struct Formed {
     /// s where the sheet leaves the plate, and where the raised face starts.
     foot: f64,
     top: f64,
+    /// A louver's lance.
+    lance: Option<Lance>,
 }
 
 impl Formed {
@@ -224,7 +250,104 @@ impl Formed {
             tops,
             foot,
             top,
+            lance: None,
         })
+    }
+
+    /// A louver: its section from the footprint to the lance, worked out
+    /// pressed down from z = T and mirrored for one that rises.
+    pub fn louver(l: &Louver, t: f64, bend_radius: f64) -> Result<Formed, SheetError> {
+        let invalid = |what: &str| Err(SheetError::Invalid(format!("louver {}: {what}", l.id)));
+        let (big, r, len) = (l.radius, l.bend_radius.unwrap_or(bend_radius), l.length);
+        if !(len > 0.0 && r >= 0.0) {
+            return invalid("needs a positive length and a bend radius of 0 or more");
+        }
+        if !(big > t + EPS) {
+            return invalid("its radius must be more than the thickness, or it doesn't open");
+        }
+        // (s, z), s from the lance towards the hood: the corner where it
+        // leaves the plate around fc, the hood around its axis on the lance
+        // in the face at z = T; the two touch.
+        let d = big + r + t;
+        let a = (d * d - (r + t).powi(2)).sqrt();
+        // Turned round an end's axis the corner's outside must stay clear of
+        // it (a ring torus): R > (sqrt 2 - 1)(r + T).
+        if a <= r + t + EPS {
+            return invalid("its bend radius is too large for its radius: the corner closes on itself at the ends");
+        }
+        let (fc, hc) = ([a, -r], [0.0, t]);
+        let (bend, hood) = ((t + r).atan2(-a), (-(t + r)).atan2(a));
+        let arc = |c: P2, rho: f64, a0: f64, a1: f64| Meridian::Arc { c, rho, a0, a1 };
+        let down = [
+            vec![
+                arc(fc, r, FRAC_PI_2, bend),
+                arc(hc, big + t, hood, -FRAC_PI_2),
+            ],
+            vec![
+                arc(fc, r + t, FRAC_PI_2, bend),
+                arc(hc, big, hood, -FRAC_PI_2),
+            ],
+        ];
+        // The face that leaves z = T crosses z = 0 on its corner, where the
+        // sine comes to r / (r + T), or on the hood.
+        let (piece, angle) = if r / (r + t) >= (t + r) / d {
+            (0, PI - (r / (r + t)).asin())
+        } else {
+            (1, -(t / big).asin())
+        };
+        let Meridian::Arc { a0, a1, .. } = down[1][piece] else {
+            unreachable!()
+        };
+        let f = (angle - a0) / (a1 - a0);
+        let cross = down[1][piece].at(f).0[0];
+        // The lance faces: the plate's side at the lance (len + 2a by T) and
+        // the hood's section there (len by T, and the section at each end),
+        // less twice where they overlap: under that face, above z = 0.
+        let section: f64 = (0..2).map(|i| between(down[0][i], down[1][i])[0]).sum();
+        let mut under = a * t;
+        for (i, m) in down[1].iter().enumerate().take(piece + 1) {
+            let m = match *m {
+                Meridian::Arc { c, rho, a0, .. } if i == piece => arc(c, rho, a0, angle),
+                m => m,
+            };
+            under += green(m)[0];
+        }
+        let area = (len + 2.0 * a) * t + len * t + 2.0 * section - 4.0 * under.abs();
+        let (chains, out) = match l.side {
+            Side::Down => (down, 1),
+            // Mirrored, the face that left z = T leaves z = 0.
+            Side::Up => {
+                let flip = |c: &Vec<Meridian>| c.iter().map(|m| m.mirrored(t)).collect();
+                ([flip(&down[1]), flip(&down[0])], 0)
+            }
+        };
+        Ok(Formed {
+            id: l.id.clone(),
+            center: l.at,
+            plan: Plan::Louver {
+                length: len,
+                angle: l.angle.to_radians() - FRAC_PI_2,
+            },
+            chains,
+            tops: [0.0; 2],
+            foot: a,
+            top: 0.0,
+            lance: Some(Lance {
+                out,
+                piece,
+                f,
+                cross,
+                area,
+            }),
+        })
+    }
+
+    /// What it is, for messages: "emboss e1", "louver l1".
+    pub fn what(&self) -> String {
+        match self.plan {
+            Plan::Louver { .. } => format!("louver {}", self.id),
+            _ => format!("emboss {}", self.id),
+        }
     }
 
     /// A round emboss's footprint, as the hole the plate keeps.
@@ -234,7 +357,7 @@ impl Formed {
                 center: self.center,
                 diameter: 2.0 * (half + self.foot),
             }),
-            Plan::Rect { .. } => None,
+            Plan::Rect { .. } | Plan::Louver { .. } => None,
         }
     }
 
@@ -266,6 +389,31 @@ impl Formed {
                     })
                     .collect(),
             },
+            // The far side, the far end, the lance (its end beyond the
+            // hood, the part across from it, its near end), the near end.
+            Plan::Louver { length, .. } => {
+                let (h, a) = (length / 2.0, self.foot);
+                let c = self.lance.expect("a louver's lance").cross;
+                let arc = |x: f64| {
+                    Some(Curve::Arc(Arc {
+                        center: self.place([x, 0.0]),
+                        ccw: true,
+                    }))
+                };
+                Ring {
+                    points: [
+                        [-h, -a],
+                        [h, -a],
+                        [h + a, 0.0],
+                        [h + c, 0.0],
+                        [-h - c, 0.0],
+                        [-h - a, 0.0],
+                    ]
+                    .map(|p| self.place(p))
+                    .to_vec(),
+                    arcs: vec![None, arc(h), None, None, None, arc(-h)],
+                }
+            }
         }
     }
 
@@ -274,6 +422,7 @@ impl Formed {
         match self.plan {
             Plan::Round(half) => half,
             Plan::Rect { rc, .. } => rc,
+            Plan::Louver { .. } => 0.0,
         }
     }
 
@@ -282,6 +431,7 @@ impl Formed {
         match self.plan {
             Plan::Round(half) => TAU * (half + s),
             Plan::Rect { hw, hl, rc, .. } => 4.0 * (hw + hl) - 8.0 * rc + TAU * (rc + s),
+            Plan::Louver { length, .. } => length + PI * s,
         }
     }
 
@@ -292,12 +442,13 @@ impl Formed {
             Plan::Rect { hw, hl, rc, .. } => {
                 4.0 * (hw + s) * (hl + s) - (4.0 - PI) * (rc + s).powi(2)
             }
+            Plan::Louver { .. } => 0.0,
         }
     }
 
     fn turn(&self) -> f64 {
         match self.plan {
-            Plan::Rect { angle, .. } => angle,
+            Plan::Rect { angle, .. } | Plan::Louver { angle, .. } => angle,
             Plan::Round(_) => 0.0,
         }
     }
@@ -387,44 +538,46 @@ impl Formed {
 
     /// The material between the two faces and both faces' areas: the
     /// section swept along the outline (offset outline length P(s) = P0 +
-    /// 2 pi s), and the raised face's slab. Base frame.
+    /// 2 pi s; a louver's L + pi s), and the raised face's slab or a
+    /// louver's lance faces. Base frame.
     pub fn mass(&self) -> Mass {
         let p0 = self.perimeter(0.0);
+        let turn = self.perimeter(1.0) - p0;
         let (mut volume, mut mz, mut area) = (0.0, 0.0, 0.0);
+        let (mut ms, mut ms2) = (0.0, 0.0);
         for i in 0..self.chains[0].len() {
             let [p, q] = [self.chains[0][i], self.chains[1][i]];
-            // The region between the two pieces: along p, across to q's end,
-            // back along q, across to p's start. Green's theorem gives the
-            // integrals of 1, s, z and s z over it.
-            let across = |a: P2, b: P2| Meridian::Line { a, b };
-            let mut g = [0.0; 4];
-            for (m, sign) in [
-                (p, 1.0),
-                (across(p.at(1.0).0, q.at(1.0).0), 1.0),
-                (q, -1.0),
-                (across(p.at(0.0).0, q.at(0.0).0), -1.0),
-            ] {
-                for (k, v) in green(m).into_iter().enumerate() {
-                    g[k] += sign * v;
-                }
-            }
-            // The loop runs either way round.
-            let g = g.map(|v| v * g[0].signum());
-            volume += p0 * g[0] + TAU * g[1];
-            mz += p0 * g[2] + TAU * g[3];
+            let g = between(p, q);
+            volume += p0 * g[0] + turn * g[1];
+            mz += p0 * g[2] + turn * g[3];
+            ms += g[1];
+            ms2 += g[4];
             for m in [p, q] {
-                area += length_moment(m, p0);
+                area += length_moment(m, p0, turn);
             }
         }
-        let slab = self.plan_area(self.top);
-        let t = (self.tops[1] - self.tops[0]).abs();
-        volume += slab * t;
-        mz += slab * t * (self.tops[0] + self.tops[1]) / 2.0;
-        area += 2.0 * slab;
+        let mut center = self.center;
+        match (self.plan, self.lance) {
+            (Plan::Louver { length, .. }, Some(lance)) => {
+                area += lance.area;
+                // Towards the hood: the straight's moment length * s, each
+                // end's s^2 (cos phi over a quarter turn).
+                let back = (length * ms + 2.0 * ms2) / volume;
+                let w = self.place_dir([0.0, 1.0]);
+                center = [center[0] - back * w[0], center[1] - back * w[1]];
+            }
+            _ => {
+                let slab = self.plan_area(self.top);
+                let t = (self.tops[1] - self.tops[0]).abs();
+                volume += slab * t;
+                mz += slab * t * (self.tops[0] + self.tops[1]) / 2.0;
+                area += 2.0 * slab;
+            }
+        }
         Mass {
             volume,
             area,
-            center_of_mass: [self.center[0], self.center[1], mz / volume],
+            center_of_mass: [center[0], center[1], mz / volume],
         }
     }
 
@@ -603,10 +756,411 @@ impl Formed {
         Ok(())
     }
 
+    /// Builds a rectangular emboss's or a louver's faces in `b`, on the
+    /// footprint's edges: per level, the vertex at each ring point and each
+    /// segment's edge (id, start vertex).
+    pub fn build_ring(
+        &self,
+        b: &mut Builder,
+        m: Rigid,
+        vertices: [Vec<u32>; 2],
+        edges: [Vec<(u32, u32)>; 2],
+    ) -> Result<(), GeometryError> {
+        if let Plan::Louver { .. } = self.plan {
+            return self.build_louver(b, m, vertices, edges);
+        }
+        let vertices = std::array::from_fn(|l| std::array::from_fn(|j| vertices[l][j]));
+        let edges = std::array::from_fn(|l| std::array::from_fn(|j| edges[l][j]));
+        self.build_rect(b, m, vertices, edges)
+    }
+
+    /// Builds a louver's faces: per face of the sheet each piece of its
+    /// section along the straight (a cylinder) and round each end (a torus,
+    /// or a sphere where it turns about the end's axis), and the two plane
+    /// faces at the lance: the plate's side above the other face's level,
+    /// and the hood's section below it.
+    fn build_louver(
+        &self,
+        b: &mut Builder,
+        m: Rigid,
+        vertices: [Vec<u32>; 2],
+        edges: [Vec<(u32, u32)>; 2],
+    ) -> Result<(), GeometryError> {
+        let b = &mut Moved { b, m };
+        let Plan::Louver { length, .. } = self.plan else {
+            unreachable!()
+        };
+        let lance = self.lance.expect("a louver's lance");
+        let h = length / 2.0;
+        let (u, w) = (self.place_dir([1.0, 0.0]), self.place_dir([0.0, 1.0]));
+        let o = self.center;
+        // A section point q (s, z) at p along the straight, or on the end
+        // at sigma (+1: along u), turned phi from the straight towards the
+        // lance.
+        let straight = |p: f64, q: P2| -> P3 {
+            [
+                o[0] + p * u[0] - q[0] * w[0],
+                o[1] + p * u[1] - q[0] * w[1],
+                q[1],
+            ]
+        };
+        let end = |sigma: f64, phi: f64, q: P2| -> P3 {
+            let along = sigma * (h + q[0] * phi.sin());
+            let back = q[0] * phi.cos();
+            [
+                o[0] + along * u[0] - back * w[0],
+                o[1] + along * u[1] - back * w[1],
+                q[1],
+            ]
+        };
+        let minus_w = [-w[0], -w[1], 0.0];
+        // A step round a loop: (edge, its start vertex, from, to).
+        type Step = (u32, u32, u32, u32);
+        let rev = |path: &[Step]| -> Vec<Step> {
+            path.iter()
+                .rev()
+                .map(|&(e, s, f, t)| (e, s, t, f))
+                .collect()
+        };
+        let sigmas = [-1.0, 1.0];
+        // Per level: the faces' steps, kept for the lance faces.
+        struct Level {
+            /// Down each end's lance plane, from the footprint (sigma index).
+            lance_path: [Vec<(usize, Vec<Step>)>; 2],
+            /// The straight's last line (at the lance), and its ends.
+            last: Step,
+        }
+        let mut levels = Vec::new();
+        for level in 0..2 {
+            let all = &self.chains[level];
+            let other = &self.chains[1 - level];
+            // Pieces of no size (a sharp inside corner) aren't faces.
+            let pieces: Vec<(usize, Meridian)> = all
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, m)| !matches!(m, Meridian::Arc { rho, .. } if *rho < EPS))
+                .collect();
+            let n = pieces.len();
+            let mut qs = vec![pieces[0].1.at(0.0).0];
+            qs.extend(pieces.iter().map(|(_, m)| m.at(1.0).0));
+            let ring = &vertices[level];
+            // Vertices per sigma and station: where it joins the straight,
+            // and at the lance; at the last station (s = 0) one point.
+            let mut join = [vec![ring[0]], vec![ring[1]]];
+            let mut at_lance = [vec![ring[5]], vec![ring[2]]];
+            for (k, q) in qs.iter().enumerate().skip(1) {
+                for (si, &sigma) in sigmas.iter().enumerate() {
+                    let j = b.vertex(end(sigma, 0.0, *q));
+                    let l = if k == n {
+                        j
+                    } else {
+                        b.vertex(end(sigma, FRAC_PI_2, *q))
+                    };
+                    join[si].push(j);
+                    at_lance[si].push(l);
+                }
+            }
+            // The straight's lines, and each end's quarter circles, per
+            // station.
+            let mut lines: Vec<Step> =
+                vec![(edges[level][0].0, edges[level][0].1, join[0][0], join[1][0])];
+            let mut quarters: [Vec<Option<Step>>; 2] = [
+                vec![Some((
+                    edges[level][5].0,
+                    edges[level][5].1,
+                    join[0][0],
+                    at_lance[0][0],
+                ))],
+                vec![Some((
+                    edges[level][1].0,
+                    edges[level][1].1,
+                    join[1][0],
+                    at_lance[1][0],
+                ))],
+            ];
+            for (k, q) in qs.iter().enumerate().skip(1) {
+                let id = b.edge(
+                    CurveGeometry::Line {
+                        origin: straight(-h, *q),
+                        direction: u,
+                    },
+                    Interval::new(0.0, length)?,
+                    false,
+                );
+                lines.push((id, join[0][k], join[0][k], join[1][k]));
+                for (si, &sigma) in sigmas.iter().enumerate() {
+                    if k == n {
+                        quarters[si].push(None);
+                        continue;
+                    }
+                    let x = minus_w;
+                    let y = u.map(|v| sigma * v);
+                    let id = b.edge(
+                        CurveGeometry::Circle {
+                            frame: Frame3 {
+                                origin: end(sigma, 0.0, [0.0, q[1]]),
+                                x,
+                                y,
+                                z: cross(x, y),
+                            },
+                            radius: q[0],
+                        },
+                        Interval::new(0.0, FRAC_PI_2)?,
+                        false,
+                    );
+                    quarters[si].push(Some((id, join[si][k], join[si][k], at_lance[si][k])));
+                }
+            }
+            let mut lance_path: [Vec<(usize, Vec<Step>)>; 2] = [Vec::new(), Vec::new()];
+            for (k, &(index, piece)) in pieces.iter().enumerate() {
+                let Meridian::Arc { c, rho, a0, a1 } = piece else {
+                    unreachable!("a louver's section is arcs")
+                };
+                let (here, there) = (piece.at(0.5).0, other[index].at(0.5).0);
+                let out = [here[0] - there[0], here[1] - there[1]];
+                // An arc of the section in a vertical plane, centred at the
+                // section's centre placed by `at`, from `from` to `to` (angles
+                // between a0 and a1, from x towards z) as one edge.
+                let arc_edge =
+                    |b: &mut Moved, centre: P3, x: P3, from: (f64, u32), to: (f64, u32)| {
+                        let (lo, hi) = if from.0 < to.0 {
+                            (from, to)
+                        } else {
+                            (to, from)
+                        };
+                        let id = b.edge(
+                            CurveGeometry::Circle {
+                                frame: Frame3 {
+                                    origin: centre,
+                                    x,
+                                    y: Z,
+                                    z: cross(x, Z),
+                                },
+                                radius: rho,
+                            },
+                            Interval::new(lo.0, hi.0)?,
+                            false,
+                        );
+                        Ok::<Step, GeometryError>((id, lo.1, from.1, to.1))
+                    };
+                let mut join_m = Vec::new();
+                for (si, &sigma) in sigmas.iter().enumerate() {
+                    // Where it joins the straight.
+                    let step = arc_edge(
+                        b,
+                        end(sigma, 0.0, c),
+                        minus_w,
+                        (a0, join[si][k]),
+                        (a1, join[si][k + 1]),
+                    )?;
+                    join_m.push(step);
+                    // In the lance's plane: split where the face that leaves
+                    // the plate crosses its other face (a ring point there).
+                    let x = u.map(|v| sigma * v);
+                    let centre = end(sigma, FRAC_PI_2, c);
+                    let (from, to) = ((a0, at_lance[si][k]), (a1, at_lance[si][k + 1]));
+                    let path = if level == lance.out && index == lance.piece {
+                        let crossing = (
+                            a0 + lance.f * (a1 - a0),
+                            vertices[1 - level][if sigma > 0.0 { 3 } else { 4 }],
+                        );
+                        vec![
+                            arc_edge(b, centre, x, from, crossing)?,
+                            arc_edge(b, centre, x, crossing, to)?,
+                        ]
+                    } else {
+                        vec![arc_edge(b, centre, x, from, to)?]
+                    };
+                    lance_path[si].push((index, path));
+                }
+                // Along the straight: a cylinder about the section's centre.
+                let x = minus_w;
+                let surface = SurfaceGeometry::Cylinder {
+                    frame: Frame3 {
+                        origin: straight(0.0, c),
+                        x,
+                        y: Z,
+                        z: cross(x, Z),
+                    },
+                    radius: rho,
+                };
+                let steps = [
+                    vec![lines[k]],
+                    vec![join_m[1]],
+                    rev(&[lines[k + 1]]),
+                    rev(&[join_m[0]]),
+                ]
+                .concat();
+                let samples: Vec<P3> = (0..=8)
+                    .flat_map(|i| (0..=8).map(move |j| (i as f64 / 8.0, j as f64 / 8.0)))
+                    .map(|(fp, fq)| straight(-h + fp * length, piece.at(fq).0))
+                    .collect();
+                let outward = [out[0] * minus_w[0], out[0] * minus_w[1], out[1]];
+                louver_face(
+                    b,
+                    &format!("{}.{level}.{k}.straight", self.id),
+                    surface,
+                    &steps,
+                    &samples,
+                    straight(0.0, piece.at(0.5).0),
+                    outward,
+                )?;
+                // Round each end: a torus, or a sphere about the end's axis.
+                for (si, &sigma) in sigmas.iter().enumerate() {
+                    let x = unit3([sigma * u[0] - w[0], sigma * u[1] - w[1], 0.0]);
+                    let surface = if c[0].abs() > EPS {
+                        SurfaceGeometry::Torus {
+                            frame: Frame3 {
+                                origin: end(sigma, 0.0, [0.0, c[1]]),
+                                x,
+                                y: cross(Z, x),
+                                z: Z,
+                            },
+                            major_radius: c[0],
+                            minor_radius: rho,
+                        }
+                    } else {
+                        // Its poles off the face, level with the centre.
+                        let z = unit3([sigma * u[0] + w[0], sigma * u[1] + w[1], 0.0]);
+                        SurfaceGeometry::Sphere {
+                            frame: Frame3 {
+                                origin: end(sigma, 0.0, c),
+                                x,
+                                y: cross(z, x),
+                                z,
+                            },
+                            radius: rho,
+                        }
+                    };
+                    let path = &lance_path[si].last().expect("just pushed").1;
+                    let mut steps = Vec::new();
+                    steps.extend(quarters[si][k]);
+                    steps.extend(path.iter().copied());
+                    if let Some(q) = quarters[si][k + 1] {
+                        steps.extend(rev(&[q]));
+                    }
+                    steps.extend(rev(&[join_m[si]]));
+                    let samples: Vec<P3> = (0..=8)
+                        .flat_map(|i| (0..=8).map(move |j| (i as f64 / 8.0, j as f64 / 8.0)))
+                        .map(|(fp, fq)| end(sigma, fp * FRAC_PI_2, piece.at(fq).0))
+                        .collect();
+                    let phi = FRAC_PI_2 / 2.0;
+                    let radial = [
+                        sigma * phi.sin() * u[0] - phi.cos() * w[0],
+                        sigma * phi.sin() * u[1] - phi.cos() * w[1],
+                    ];
+                    let outward = [out[0] * radial[0], out[0] * radial[1], out[1]];
+                    louver_face(
+                        b,
+                        &format!("{}.{level}.{k}.end{si}", self.id),
+                        surface,
+                        &steps,
+                        &samples,
+                        end(sigma, phi, piece.at(0.5).0),
+                        outward,
+                    )?;
+                }
+            }
+            levels.push(Level {
+                lance_path,
+                last: lines[n],
+            });
+        }
+        // The lance faces, in the plane through the lance square to w.
+        let (out, inner) = (lance.out, 1 - lance.out);
+        let ring = |level: usize, j: usize| -> Step {
+            let (id, start) = edges[level][j];
+            (id, start, vertices[level][j], vertices[level][(j + 1) % 6])
+        };
+        // The face leaving the plate, down each end's lance plane: above the
+        // crossing and below it.
+        let split = |si: usize| -> (Vec<Step>, Vec<Step>) {
+            let (mut above, mut below) = (Vec::new(), Vec::new());
+            for (index, path) in &levels[out].lance_path[si] {
+                if *index < lance.piece {
+                    above.extend(path.iter().copied());
+                } else if *index == lance.piece {
+                    above.push(path[0]);
+                    below.push(path[1]);
+                } else {
+                    below.extend(path.iter().copied());
+                }
+            }
+            (above, below)
+        };
+        let ((above_near, below_near), (above_far, below_far)) = (split(0), split(1));
+        let side = [
+            vec![ring(out, 2), ring(out, 3), ring(out, 4)],
+            above_near,
+            rev(&[ring(inner, 3)]),
+            rev(&above_far),
+        ]
+        .concat();
+        let whole = |level: usize, si: usize| -> Vec<Step> {
+            levels[level].lance_path[si]
+                .iter()
+                .flat_map(|(_, p)| p.iter().copied())
+                .collect()
+        };
+        let section = [
+            vec![ring(inner, 2)],
+            below_far,
+            rev(&[levels[out].last]),
+            rev(&below_near),
+            vec![ring(inner, 4)],
+            whole(inner, 0),
+            vec![levels[inner].last],
+            rev(&whole(inner, 1)),
+        ]
+        .concat();
+        let frame = Frame3 {
+            origin: [o[0], o[1], 0.0],
+            x: u,
+            y: Z,
+            z: cross(u, Z),
+        };
+        let r = h
+            + self.foot
+            + self
+                .chains
+                .iter()
+                .flatten()
+                .map(|m| match m {
+                    Meridian::Arc { c, rho, .. } => c[1].abs() + rho,
+                    Meridian::Line { .. } => 0.0,
+                })
+                .fold(0.0, f64::max)
+            + 1.0;
+        // The plate's side faces -w (the frame's normal), the hood's +w.
+        for (name, steps, sense) in [
+            ("side", side, Orientation::Forward),
+            ("section", section, Orientation::Reverse),
+        ] {
+            let mut uses = Vec::new();
+            for (id, start, from, to) in steps {
+                let along = if from == start {
+                    Orientation::Forward
+                } else {
+                    Orientation::Reverse
+                };
+                uses.push(b.plane_boundary(frame, id, from, to, along)?);
+            }
+            let face = b.face(
+                &format!("{}.lance.{name}", self.id),
+                SurfaceGeometry::Plane { frame },
+                [[-r, r]; 2],
+                uses,
+            )?;
+            b.set_face_sense(face, sense)?;
+        }
+        Ok(())
+    }
+
     /// Builds a rectangular emboss's two faces in `b`, on the footprint's
     /// edges: per level, the vertex at each of the eight segments' starts and
     /// each segment's edge (id, start vertex).
-    pub fn build_rect(
+    fn build_rect(
         &self,
         b: &mut Builder,
         m: Rigid,
@@ -885,7 +1439,8 @@ impl Moved<'_> {
             SurfaceGeometry::Plane { frame }
             | SurfaceGeometry::Cylinder { frame, .. }
             | SurfaceGeometry::Cone { frame, .. }
-            | SurfaceGeometry::Torus { frame, .. } => *frame = self.frame(*frame),
+            | SurfaceGeometry::Torus { frame, .. }
+            | SurfaceGeometry::Sphere { frame, .. } => *frame = self.frame(*frame),
             _ => unreachable!("an emboss has no other surfaces"),
         }
         s
@@ -981,10 +1536,31 @@ fn revolved(axis: P3, x: P3, q: P2, dir: P2) -> (SurfaceGeometry, f64, f64) {
     (surface, up, apex)
 }
 
+/// Between two pieces of the section (the region along p, across to q's
+/// end, back along q, across to p's start): the integrals of 1, s, z, s z
+/// and s^2 over it, by Green's theorem.
+fn between(p: Meridian, q: Meridian) -> [f64; 5] {
+    let across = |a: P2, b: P2| Meridian::Line { a, b };
+    let mut g = [0.0; 5];
+    for (m, sign) in [
+        (p, 1.0),
+        (across(p.at(1.0).0, q.at(1.0).0), 1.0),
+        (q, -1.0),
+        (across(p.at(0.0).0, q.at(0.0).0), -1.0),
+    ] {
+        for (k, v) in green(m).into_iter().enumerate() {
+            g[k] += sign * v;
+        }
+    }
+    // The loop runs either way round.
+    g.map(|v| v * g[0].signum())
+}
+
 /// Over the piece, by Green's theorem, the integrals over the region it
-/// bounds of 1, s, z and s z: of s dz, s^2 / 2 dz, s z dz, s^2 z / 2 dz.
-fn green(m: Meridian) -> [f64; 4] {
-    let mut g = [0.0; 4];
+/// bounds of 1, s, z, s z and s^2: of s dz, s^2 / 2 dz, s z dz, s^2 z / 2
+/// dz, s^3 / 3 dz.
+fn green(m: Meridian) -> [f64; 5] {
+    let mut g = [0.0; 5];
     let parts = 8;
     for k in 0..parts {
         for (node, w) in GAUSS {
@@ -995,23 +1571,67 @@ fn green(m: Meridian) -> [f64; 4] {
             g[1] += s * s / 2.0 * w;
             g[2] += s * z * w;
             g[3] += s * s * z / 2.0 * w;
+            g[4] += s * s * s / 3.0 * w;
         }
     }
     g
 }
 
-/// The area the piece sweeps along the outline: the integral of (p0 + 2 pi
-/// s) along it.
-fn length_moment(m: Meridian, p0: f64) -> f64 {
+/// The area the piece sweeps along the outline: the integral of (p0 + turn
+/// s) along it (turn 2 pi round a closed outline).
+fn length_moment(m: Meridian, p0: f64, turn: f64) -> f64 {
     let mut a = 0.0;
     let parts = 8;
     for k in 0..parts {
         for (node, w) in GAUSS {
             let (p, d) = m.at((k as f64 + node) / parts as f64);
-            a += (p0 + TAU * p[0]) * d[0].hypot(d[1]) * w / parts as f64;
+            a += (p0 + turn * p[0]) * d[0].hypot(d[1]) * w / parts as f64;
         }
     }
     a
+}
+
+/// A louver's curved face: its loop's steps (edge, start, from, to) on the
+/// surface, its bounds from the samples, turned to face `outward` at `mid`.
+fn louver_face(
+    b: &mut Moved,
+    key: &str,
+    surface: SurfaceGeometry,
+    steps: &[(u32, u32, u32, u32)],
+    samples: &[P3],
+    mid: P3,
+    outward: P3,
+) -> Result<(), GeometryError> {
+    let hint = surface.project(mid, None)?;
+    let mut uses = Vec::new();
+    for &(id, start, from, to) in steps {
+        let sense = if from == start {
+            Orientation::Forward
+        } else {
+            Orientation::Reverse
+        };
+        uses.push(b.projected_boundary(&surface, id, from, to, sense, Some(hint))?);
+    }
+    let mut bounds = [[f64::MAX, f64::MIN]; 2];
+    for &p in samples {
+        let uv = surface.project(p, Some(hint))?;
+        for k in 0..2 {
+            bounds[k][0] = bounds[k][0].min(uv[k]);
+            bounds[k][1] = bounds[k][1].max(uv[k]);
+        }
+    }
+    let bounds = bounds.map(|[lo, hi]| [lo - 1e-6, hi + 1e-6]);
+    let normal = surface.normal_at(hint)?;
+    let face = b.face(key, surface, bounds, uses)?;
+    if dot(normal, outward) < 0.0 {
+        b.set_face_sense(face, Orientation::Reverse)?;
+    }
+    Ok(())
+}
+
+fn unit3(a: P3) -> P3 {
+    let n = norm(a);
+    a.map(|v| v / n)
 }
 
 fn sub(a: P3, b: P3) -> P3 {
@@ -1116,6 +1736,211 @@ mod tests {
             .unwrap();
         assert!((f.area() - 6000.0).abs() < 1e-9 && f.holes.is_empty() && f.cutouts.is_empty());
         assert_eq!(f.forms.len(), 1);
+    }
+
+    /// A louver on the 100 x 60 plate, the hood's middle on the lance at
+    /// (53, 30), opening along +x.
+    fn louver_part(t: f64, extra: &str) -> PartSpec {
+        serde_json::from_str(&format!(
+            r#"{{"id": "l", "thickness": {t}, "bend_radius": 2, "k_factor": 0.4,
+            "base": {{"outline": [[0, 0], [100, 0], [100, 60], [0, 60]],
+                "louvers": [{{"id": "v", "at": [53, 30], "length": 20, "radius": 6,
+                    "bend_radius": {}{extra}}}]}}}}"#,
+            2.0 - t
+        ))
+        .unwrap()
+    }
+
+    /// The reference CAD's louver tool: a hood of inside radius 6, 20 long
+    /// between its ends' axes, leaving the plate over a corner of outside
+    /// radius 2 (inside 0 on T 2, 1 on T 1).
+    #[test]
+    fn a_louver_is_an_exact_solid() {
+        for (t, volume, area, center, faces) in [
+            (
+                2.0,
+                12213.809432,
+                12994.346914,
+                [49.967314, 30.0, 0.808252],
+                17,
+            ),
+            (
+                1.0,
+                6104.093121,
+                12599.854554,
+                [49.972392, 30.0, 0.316575],
+                20,
+            ),
+        ] {
+            let spec = louver_part(t, r#", "side": "down""#);
+            let exact = crate::fold::exact_mass(&spec).unwrap();
+            assert!(
+                (exact.volume - volume).abs() < 1e-6,
+                "T {t}: {}",
+                exact.volume
+            );
+            assert!(
+                (exact.area - area).abs() < 1e-6,
+                "T {t}: area {}",
+                exact.area
+            );
+            for j in 0..3 {
+                let d = (exact.center_of_mass[j] - center[j]).abs();
+                assert!(d < 1e-6, "T {t}: {:?}", exact.center_of_mass);
+            }
+            let solid = crate::fold::fold(&spec).unwrap_or_else(|e| panic!("T {t}: {e}"));
+            assert_eq!(solid.topology.faces.len(), faces, "T {t}");
+            let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+            let rel = |a: f64, b: f64| (a - b).abs() / b;
+            assert!(
+                rel(mesh.volume, exact.volume) < 2e-5,
+                "T {t}: {}",
+                mesh.volume
+            );
+            assert!(
+                rel(mesh.area, exact.area) < 2e-5,
+                "T {t}: area {}",
+                mesh.area
+            );
+        }
+        // Up, opening along +y: the same, mirrored and turned.
+        let spec = louver_part(2.0, r#", "side": "up", "angle": 90"#);
+        let m = crate::fold::exact_mass(&spec).unwrap();
+        assert!((m.volume - 12213.809432).abs() < 1e-6, "{}", m.volume);
+        assert!((m.area - 12994.346914).abs() < 1e-6, "{}", m.area);
+        // The louver's moment about the lance's middle (the down case's, less
+        // the whole plate's) turns a quarter turn; the plate's stays.
+        let (v, plate) = (12213.809432, 12000.0);
+        let louver = v * (49.967314 - 53.0) - plate * (50.0 - 53.0);
+        let want = [
+            53.0 + plate * (50.0 - 53.0) / v,
+            30.0 + louver / v,
+            2.0 - 0.808252,
+        ];
+        for j in 0..3 {
+            assert!(
+                (m.center_of_mass[j] - want[j]).abs() < 1e-6,
+                "{:?}",
+                m.center_of_mass
+            );
+        }
+        let solid = crate::fold::fold(&spec).unwrap();
+        let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+        assert!(
+            (mesh.volume - m.volume).abs() / m.volume < 2e-5,
+            "{}",
+            mesh.volume
+        );
+        // The flat keeps the plate whole and marks the footprint.
+        let f = crate::flat::flat_pattern(&spec).unwrap();
+        assert!((f.area() - 6000.0).abs() < 1e-9 && f.cutouts.is_empty());
+        assert_eq!(f.forms[0].outline.points.len(), 6);
+    }
+
+    /// A large bend radius: the face leaving the plate crosses the other
+    /// face's level on its corner, not on the hood. Also rising, turned.
+    #[test]
+    fn a_louver_crossing_on_its_corner() {
+        for (side, angle) in [("down", 0.0), ("up", 30.0)] {
+            let spec: PartSpec = serde_json::from_str(&format!(
+                r#"{{"id": "l", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [100, 0], [100, 60], [0, 60]],
+                    "louvers": [{{"id": "v", "at": [50, 30], "length": 12, "radius": 6,
+                        "bend_radius": 10, "side": "{side}", "angle": {angle}}}]}}}}"#
+            ))
+            .unwrap();
+            let exact = crate::fold::exact_mass(&spec).unwrap();
+            let solid = crate::fold::fold(&spec).unwrap_or_else(|e| panic!("{side}: {e}"));
+            assert_eq!(solid.topology.faces.len(), 20, "{side}");
+            let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+            let rel = |a: f64, b: f64| (a - b).abs() / b;
+            assert!(
+                rel(mesh.volume, exact.volume) < 2e-5,
+                "{side}: {} vs {}",
+                mesh.volume,
+                exact.volume
+            );
+            assert!(
+                rel(mesh.area, exact.area) < 2e-5,
+                "{side}: area {} vs {}",
+                mesh.area,
+                exact.area
+            );
+            for j in 0..3 {
+                let d = (mesh.center_of_mass[j] - exact.center_of_mass[j]).abs();
+                assert!(
+                    d < 1e-3,
+                    "{side}: {:?} vs {:?}",
+                    mesh.center_of_mass,
+                    exact.center_of_mass
+                );
+            }
+        }
+    }
+
+    /// A louver on a flange moves with it, up or down, turned: the solid
+    /// meshes to its exact mass.
+    #[test]
+    fn a_louver_on_a_flange_moves_with_it() {
+        for (angle, fside, side, turn) in [
+            (90.0, "up", "up", 0.0),
+            (90.0, "down", "down", 90.0),
+            (120.0, "up", "down", 200.0),
+        ] {
+            let spec: PartSpec = serde_json::from_str(&format!(
+                r#"{{"id": "l", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [100, 0], [100, 60], [0, 60]],
+                    "louvers": [{{"id": "v", "on": "f", "at": [50, 25], "length": 12,
+                        "radius": 6, "bend_radius": 0, "side": "{side}", "angle": {turn}}}]}},
+                "flanges": [{{"id": "f", "on": {{"base": 0}}, "angle": {angle}, "length": 50,
+                    "datum": "outer", "position": "outside", "side": "{fside}"}}]}}"#
+            ))
+            .unwrap();
+            let what = format!("{angle} {fside} {side} {turn}");
+            let solid = crate::fold::fold(&spec).unwrap_or_else(|e| panic!("{what}: {e}"));
+            let exact = crate::fold::exact_mass(&spec).unwrap();
+            let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+            let rel = |a: f64, b: f64| (a - b).abs() / b;
+            assert!(rel(mesh.volume, exact.volume) < 2e-5, "{what}: volume");
+            assert!(rel(mesh.area, exact.area) < 2e-5, "{what}: area");
+            for j in 0..3 {
+                let d = (mesh.center_of_mass[j] - exact.center_of_mass[j]).abs();
+                assert!(
+                    d < 1e-3,
+                    "{what}: {:?} vs {:?}",
+                    mesh.center_of_mass,
+                    exact.center_of_mass
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn what_a_louver_refuses() {
+        let louver = |t: f64, at: [f64; 2], length: f64, radius: f64| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"id": "l", "thickness": {t}, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [100, 0], [100, 60], [0, 60]],
+                    "louvers": [{{"id": "v", "at": {at:?}, "length": {length},
+                        "radius": {radius}, "side": "down"}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        let invalid = |spec: &PartSpec| {
+            matches!(crate::flat::flat_pattern(spec), Err(SheetError::Invalid(_)))
+        };
+        // A hood no deeper than the sheet doesn't open; no length.
+        assert!(invalid(&louver(2.0, [50.0, 30.0], 20.0, 2.0)));
+        // A corner closing on itself at the ends (R 3, r 6 on T 2).
+        let mut spec = louver(2.0, [50.0, 30.0], 20.0, 3.0);
+        spec.base.louvers[0].bend_radius = Some(6.0);
+        assert!(invalid(&spec));
+        assert!(invalid(&louver(2.0, [50.0, 30.0], 0.0, 6.0)));
+        // Its footprint across the outline.
+        assert!(crate::flat::flat_pattern(&louver(2.0, [50.0, 5.0], 60.0, 6.0)).is_err());
+        assert!(crate::flat::flat_pattern(&louver(2.0, [8.0, 30.0], 20.0, 6.0)).is_err());
+        // Its default bend radius is the part's.
+        assert!(crate::flat::flat_pattern(&louver(2.0, [50.0, 30.0], 20.0, 6.0)).is_ok());
     }
 
     /// A drafted wall of no length: the corners meet. The reference CAD's
