@@ -1300,9 +1300,15 @@
       ]
     },
     "FlangedHole": {
-      "description": "A flanged hole: the sheet round a hole pressed out of a flat plate into a\ncollar. Seen from the side the sheet leaves the plate over a rounded corner\n(`radius` on its inside) and runs along the collar's wall, straight or\ndrafted inwards, to its end, cut square to the wall. The hole's measures\nare its inside wall's: `diameter` where it (extended) meets the plate face\nthe sheet leaves, and `height` from that face to where it ends. The flat\npattern holds the pre-hole: the collar developed along its neutral fibre\n(the corner at the bend's K-factor, then the wall) back into the plate;\nand marks the footprint. The footprint must lie on one plate, clear of\nbends.",
+      "description": "A flanged hole: the sheet round a hole pressed out of a flat plate into a\ncollar. Seen from the side the sheet leaves the plate over a rounded corner\n(`radius` on its inside) and runs along the collar's wall, straight or\ndrafted inwards, to its end, cut square to the wall. The hole's measures\nare its inside wall's: its shape where it (extended) meets the plate face\nthe sheet leaves, and `height` from that face to where it ends. The flat\npattern holds the pre-hole: the collar developed along its neutral fibre\n(the corner at the bend's K-factor, then the wall) back into the plate;\nand marks the footprint. The footprint must lie on one plate, clear of\nbends.",
       "type": "object",
       "properties": {
+        "angle": {
+          "description": "A rectangle's turn, counter-clockwise from the frame's x, degrees.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
         "at": {
           "description": "The centre.",
           "type": "array",
@@ -1312,10 +1318,6 @@
           },
           "maxItems": 2,
           "minItems": 2
-        },
-        "diameter": {
-          "type": "number",
-          "format": "double"
         },
         "draft": {
           "description": "The wall's slope from square to the plate, inwards, degrees: 0 for a\nstraight collar, below 90.",
@@ -1345,6 +1347,9 @@
           ],
           "format": "double"
         },
+        "shape": {
+          "$ref": "#/$defs/HoleShape"
+        },
         "side": {
           "description": "`up`: the collar rises towards the frame's normal, `down`: away from\nit.",
           "$ref": "#/$defs/Side"
@@ -1354,7 +1359,7 @@
       "required": [
         "id",
         "at",
-        "diameter",
+        "shape",
         "height",
         "side"
       ]
@@ -1650,6 +1655,64 @@
       "required": [
         "center",
         "diameter"
+      ]
+    },
+    "HoleShape": {
+      "description": "A flanged hole's inside wall where it meets the plate's face.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "round": {
+              "type": "object",
+              "properties": {
+                "diameter": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "diameter"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "round"
+          ]
+        },
+        {
+          "description": "`width` along x, `length` along y (before the turn), corners rounded\nin plan with `corner_radius`.",
+          "type": "object",
+          "properties": {
+            "rectangle": {
+              "type": "object",
+              "properties": {
+                "corner_radius": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "length": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "width": {
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "width",
+                "length",
+                "corner_radius"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rectangle"
+          ]
+        }
       ]
     },
     "Jog": {

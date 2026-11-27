@@ -16,7 +16,7 @@
 
 use crate::flat::{Arc, Curve, Ring, P2};
 use crate::fold::{Mass, Rigid, GAUSS, P3};
-use crate::spec::{Emboss, EmbossShape, FlangedHole, Hole, Louver, Side};
+use crate::spec::{Emboss, EmbossShape, FlangedHole, Hole, HoleShape, Louver, Side};
 use crate::SheetError;
 use opengeometry::brep::{
     boundary, plane_boundary, projected_boundary, uv_line, Builder, CurveGeometry, Frame3,
@@ -446,8 +446,32 @@ impl Formed {
             )))
         };
         let (r, d) = (h.radius.unwrap_or(bend_radius), h.draft.to_radians());
-        if !(h.diameter > 0.0 && h.height > 0.0 && r >= 0.0) {
-            return invalid("needs a positive diameter and height, and a radius of 0 or more");
+        // A round hole's s is the distance from its axis; a rectangle's from
+        // its inside wall's outline at the face (plan corners rc).
+        let (plan, base, rc) = match h.shape {
+            HoleShape::Round { diameter } => (Plan::Round(0.0), diameter / 2.0, f64::INFINITY),
+            HoleShape::Rectangle {
+                width,
+                length,
+                corner_radius,
+            } => {
+                if !(corner_radius > 0.0
+                    && width > 2.0 * corner_radius
+                    && length > 2.0 * corner_radius)
+                {
+                    return invalid("needs corners of a positive radius, less than half its sides");
+                }
+                let plan = Plan::Rect {
+                    hw: width / 2.0,
+                    hl: length / 2.0,
+                    rc: corner_radius,
+                    angle: h.angle.to_radians(),
+                };
+                (plan, 0.0, corner_radius)
+            }
+        };
+        if !(base + rc.min(1.0) > 0.0 && h.height > 0.0 && r >= 0.0) {
+            return invalid("needs a positive size and height, and a radius of 0 or more");
         }
         if !(d >= 0.0 && d < FRAC_PI_2) {
             return invalid("the draft must lie between 0 and 90 degrees");
@@ -457,15 +481,18 @@ impl Formed {
         // z = T + r; the wall's end at z = height, the end face T along n.
         let (sn, cs) = d.sin_cos();
         let n = [cs, sn];
-        let wall = |u: f64| [h.diameter / 2.0 - u * sn, u * cs];
+        let wall = |u: f64| [base - u * sn, u * cs];
         let u0 = (t + r) * (1.0 - sn) / cs;
         let u1 = h.height / cs;
         if !(u1 > u0 + EPS) {
             return invalid("too low for its radius and thickness: no wall");
         }
         let end = wall(u1);
-        if !(end[0] > EPS) {
-            return invalid("its wall closes the hole before it ends");
+        // What s may come down to: a round hole's axis, a rectangle's corner
+        // centres.
+        let floor = if rc.is_finite() { -rc } else { 0.0 };
+        if !(end[0] - floor > EPS) {
+            return invalid("its wall closes the hole (or its corners) before it ends");
         }
         let at = wall(u0);
         let c1 = [at[0] + (r + t) * n[0], t + r];
@@ -490,7 +517,12 @@ impl Formed {
         // footprint inwards.
         let developed = (r + k * t) * (FRAC_PI_2 - d) + (u1 - u0);
         let pre = c1[0] - developed;
-        if !(pre > EPS) {
+        // A rectangle's pre-hole may go in past its plan corners (sharp then).
+        let half = match h.shape {
+            HoleShape::Rectangle { width, length, .. } => width.min(length) / 2.0,
+            HoleShape::Round { .. } => 0.0,
+        };
+        if !(pre - floor.min(-half) > EPS) {
             return invalid("too tall to develop from the plate: no pre-hole is left");
         }
         let (chains, tops) = match h.side {
@@ -503,7 +535,7 @@ impl Formed {
         Ok(Formed {
             id: h.id.clone(),
             center: h.at,
-            plan: Plan::Round(0.0),
+            plan,
             chains,
             tops,
             foot: c1[0],
@@ -514,12 +546,31 @@ impl Formed {
         })
     }
 
-    /// A flanged hole's pre-hole in the flat pattern.
+    /// A round flanged hole's pre-hole in the flat pattern.
     pub fn pre_hole(&self) -> Option<Hole> {
-        self.open.map(|r| Hole {
-            center: self.center,
-            diameter: 2.0 * r,
-        })
+        match self.plan {
+            Plan::Round(_) => self.open.map(|r| Hole {
+                center: self.center,
+                diameter: 2.0 * r,
+            }),
+            _ => None,
+        }
+    }
+
+    /// A rectangular flanged hole's pre-hole in the flat pattern: the
+    /// outline offset to it.
+    pub fn pre_cutout(&self) -> Option<Ring> {
+        match (self.plan, self.open) {
+            (Plan::Rect { rc, .. }, Some(s)) if rc + s > EPS => Some(self.ring_at(s)),
+            // In past the plan corners: a sharp rectangle.
+            (Plan::Rect { hw, hl, .. }, Some(s)) => Some(Ring {
+                points: [[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0]]
+                    .map(|[x, y]| self.place([x * (hw + s), y * (hl + s)]))
+                    .to_vec(),
+                arcs: vec![None; 4],
+            }),
+            _ => None,
+        }
     }
 
     /// What it is, for messages: "emboss e1", "louver l1".
@@ -557,19 +608,32 @@ impl Formed {
                     arcs: vec![arc, arc],
                 }
             }
-            Plan::Rect { .. } => Ring {
-                points: (0..8).map(|j| self.flat_at(j, 0.0, self.foot)).collect(),
-                arcs: (0..8)
-                    .map(|j| {
-                        self.segment(j).corner.map(|(c, _)| {
-                            Curve::Arc(Arc {
-                                center: self.place(c),
-                                ccw: true,
-                            })
+            Plan::Rect { .. } => self.ring_at(self.foot),
+            Plan::Louver { .. } | Plan::Slot { .. } => self.ring_other(),
+        }
+    }
+
+    /// A rectangle's outline offset by s, counter-clockwise; its points the
+    /// eight segments' starts.
+    fn ring_at(&self, s: f64) -> Ring {
+        Ring {
+            points: (0..8).map(|j| self.flat_at(j, 0.0, s)).collect(),
+            arcs: (0..8)
+                .map(|j| {
+                    self.segment(j).corner.map(|(c, _)| {
+                        Curve::Arc(Arc {
+                            center: self.place(c),
+                            ccw: true,
                         })
                     })
-                    .collect(),
-            },
+                })
+                .collect(),
+        }
+    }
+
+    /// A louver's or a bead's footprint.
+    fn ring_other(&self) -> Ring {
+        match self.plan {
             // The far side, the far end, the lance (its end beyond the
             // hood, the part across from it, its near end), the near end.
             Plan::Louver { length, .. } => {
@@ -611,6 +675,7 @@ impl Formed {
                     arcs: vec![None, arc(h), None, arc(-h)],
                 }
             }
+            _ => unreachable!("a round or rectangular footprint"),
         }
     }
 
@@ -1796,6 +1861,10 @@ impl Formed {
         let Plan::Rect { rc, .. } = self.plan else {
             unreachable!()
         };
+        // A collar's last vertices, ring edges and section end (point, along)
+        // per level.
+        type End = ([u32; 8], [(u32, u32); 8], (P2, P2));
+        let mut ends: Vec<End> = Vec::new();
         for level in 0..2 {
             let chain = &self.chains[level];
             let other = &self.chains[1 - level];
@@ -1945,6 +2014,11 @@ impl Formed {
                     }
                 }
             }
+            if self.open.is_some() {
+                let last = chain.len();
+                ends.push((vs[last], rings[last], chain[last - 1].at(1.0)));
+                continue;
+            }
             // The raised face, inside the last ring.
             let up = (self.tops[level] - self.tops[1 - level]).signum();
             let x = self.place_dir([1.0, 0.0]);
@@ -1976,6 +2050,117 @@ impl Formed {
                 [[-r, r]; 2],
                 uses,
             )?;
+        }
+        if let [(v0, e0, (a, along)), (v1, e1, (q, _))] = ends[..] {
+            let len = along[0].hypot(along[1]);
+            let out = [along[0] / len, along[1] / len];
+            let loop_uses = |b: &Moved, frame: Frame3, vs: [u32; 8], es: [(u32, u32); 8]| {
+                (0..8)
+                    .map(|j| {
+                        let (id, start) = es[j];
+                        let (from, to) = (vs[j], vs[(j + 1) % 8]);
+                        let sense = if from == start {
+                            Orientation::Forward
+                        } else {
+                            Orientation::Reverse
+                        };
+                        b.plane_boundary(frame, id, from, to, sense)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            };
+            if (q[1] - a[1]).abs() < EPS {
+                // Square to a straight wall: one plane ring.
+                let up = out[1].signum();
+                let x = self.place_dir([1.0, 0.0]);
+                let frame = Frame3 {
+                    origin: [self.center[0], self.center[1], a[1]],
+                    x,
+                    y: cross([0.0, 0.0, up], x),
+                    z: [0.0, 0.0, up],
+                };
+                let (outer, inner) = if a[0] > q[0] {
+                    ((v0, e0), (v1, e1))
+                } else {
+                    ((v1, e1), (v0, e0))
+                };
+                let outer = loop_uses(b, frame, outer.0, outer.1)?;
+                let inner = loop_uses(b, frame, inner.0, inner.1)?;
+                let Plan::Rect { hw, hl, .. } = self.plan else {
+                    unreachable!()
+                };
+                let r = hw.max(hl) + q[0].abs().max(a[0].abs()) + 1.0;
+                b.face_with_holes(
+                    &format!("{}.end", self.id),
+                    SurfaceGeometry::Plane { frame },
+                    [[-r, r]; 2],
+                    outer,
+                    vec![inner],
+                )?;
+            } else {
+                // Round a drafted wall: per segment a band, across at each
+                // segment's start.
+                let across: [(u32, u32); 8] = std::array::from_fn(|j| {
+                    let (p0, p1) = (self.point3(j, 0.0, a), self.point3(j, 0.0, q));
+                    let len = norm(sub(p1, p0));
+                    let id = b.edge(
+                        CurveGeometry::Line {
+                            origin: p0,
+                            direction: sub(p1, p0).map(|x| x / len),
+                        },
+                        Interval::new(0.0, len).unwrap(),
+                        false,
+                    );
+                    (id, v0[j])
+                });
+                let m = Meridian::Line { a, b: q };
+                for j in 0..8 {
+                    let next = (j + 1) % 8;
+                    let surface = self.piece_surface(j, m);
+                    let mid = self.point3(j, 0.5, m.at(0.5).0);
+                    let hint = surface.project(mid, None)?;
+                    let mut uses = Vec::new();
+                    for ((id, start), from, to) in [
+                        (e0[j], v0[j], v0[next]),
+                        (across[next], v0[next], v1[next]),
+                        (e1[j], v1[next], v1[j]),
+                        (across[j], v1[j], v0[j]),
+                    ] {
+                        let sense = if from == start {
+                            Orientation::Forward
+                        } else {
+                            Orientation::Reverse
+                        };
+                        uses.push(b.projected_boundary(
+                            &surface,
+                            id,
+                            from,
+                            to,
+                            sense,
+                            Some(hint),
+                        )?);
+                    }
+                    let mut bounds = [[f64::MAX, f64::MIN]; 2];
+                    for fu in 0..=8 {
+                        for fv in 0..=8 {
+                            let p = self.point3(j, fu as f64 / 8.0, m.at(fv as f64 / 8.0).0);
+                            let uv = surface.project(p, Some(hint))?;
+                            for k in 0..2 {
+                                bounds[k][0] = bounds[k][0].min(uv[k]);
+                                bounds[k][1] = bounds[k][1].max(uv[k]);
+                            }
+                        }
+                    }
+                    let bounds = bounds.map(|[lo, hi]| [lo - 1e-6, hi + 1e-6]);
+                    let (_, n) = self.along(j, 0.5, 0.0);
+                    let n3 = self.place_dir(n);
+                    let outward = [n3[0] * out[0], n3[1] * out[0], out[1]];
+                    let normal = surface.normal_at(hint)?;
+                    let face = b.face(&format!("{}.end.{j}", self.id), surface, bounds, uses)?;
+                    if dot(normal, outward) < 0.0 {
+                        b.set_face_sense(face, Orientation::Reverse)?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2731,8 +2916,9 @@ mod tests {
             ))
             .unwrap()
         };
-        let straight = r#""diameter": 12.7, "height": 4, "radius": 0.5"#;
-        let drafted = r#""diameter": 12, "height": 5, "radius": 2, "draft": 20"#;
+        let straight = r#""shape": {"round": {"diameter": 12.7}}, "height": 4, "radius": 0.5"#;
+        let drafted =
+            r#""shape": {"round": {"diameter": 12}}, "height": 5, "radius": 2, "draft": 20"#;
         for (what, hole, volume, area, z) in [
             ("straight", straight, 79876.004328, 81559.989571, 0.995),
             ("drafted", drafted, 80017.298994, 81676.12454, 0.990825),
@@ -2786,6 +2972,67 @@ mod tests {
         assert_eq!(f.forms.len(), 1);
     }
 
+    /// The reference CAD's rectangular flange on the 200 x 200 plate, T 2:
+    /// a straight collar round a 20 x 30 hole with plan corners 2.5, 4 high,
+    /// corner 1; and a drafted one, turned, meshed to its exact mass.
+    #[test]
+    fn rectangular_flanged_holes_are_exact_solids() {
+        let part = |hole: &str| -> PartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"id": "h", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
+                "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
+                    "flanged_holes": [{{"id": "c", "at": [100, 100], {hole}}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        let rect = r#""shape": {"rectangle": {"width": 20, "length": 30, "corner_radius": 2.5}}"#;
+        let spec = part(&format!(
+            r#"{rect}, "height": 4, "radius": 1, "side": "down""#
+        ));
+        let exact = crate::fold::exact_mass(&spec).unwrap();
+        assert!(
+            (exact.volume - 79049.24779).abs() < 1e-6,
+            "{}",
+            exact.volume
+        );
+        assert!((exact.area - 80844.852507).abs() < 1e-6, "{}", exact.area);
+        assert!(
+            (exact.center_of_mass[2] - 0.98848).abs() < 1e-6,
+            "{:?}",
+            exact.center_of_mass
+        );
+        let solid = crate::fold::fold(&spec).unwrap();
+        assert_eq!(solid.topology.faces.len(), 39);
+        let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+        assert!(
+            (mesh.volume - exact.volume).abs() / exact.volume < 2e-5,
+            "{}",
+            mesh.volume
+        );
+        // The flat: a rounded rectangle pre-hole, the footprint marked.
+        let f = crate::flat::flat_pattern(&spec).unwrap();
+        assert_eq!((f.holes.len(), f.cutouts.len(), f.forms.len()), (0, 1, 1));
+        let drafted = part(&format!(
+            r#"{rect}, "height": 6, "radius": 1.5, "draft": 15, "side": "up", "angle": 30"#
+        ));
+        let exact = crate::fold::exact_mass(&drafted).unwrap();
+        let solid = crate::fold::fold(&drafted).unwrap();
+        assert_eq!(solid.topology.faces.len(), 46);
+        let mesh = crate::fold::mass(&solid, 2e-4).unwrap();
+        let rel = |a: f64, b: f64| (a - b).abs() / b;
+        assert!(rel(mesh.volume, exact.volume) < 2e-5, "{}", mesh.volume);
+        assert!(rel(mesh.area, exact.area) < 2e-5, "{}", mesh.area);
+        for j in 0..3 {
+            let d = (mesh.center_of_mass[j] - exact.center_of_mass[j]).abs();
+            assert!(
+                d < 1e-3,
+                "{:?} vs {:?}",
+                mesh.center_of_mass,
+                exact.center_of_mass
+            );
+        }
+    }
+
     #[test]
     fn what_a_flanged_hole_refuses() {
         let part = |hole: &str| -> PartSpec {
@@ -2802,16 +3049,16 @@ mod tests {
         // No wall above the corner; a wall closing the hole; too tall to
         // develop from the plate.
         assert!(invalid(&part(
-            r#""diameter": 12, "height": 3, "radius": 2"#
+            r#""shape": {"round": {"diameter": 12}}, "height": 3, "radius": 2"#
         )));
         assert!(invalid(&part(
-            r#""diameter": 6, "height": 20, "radius": 1, "draft": 20"#
+            r#""shape": {"round": {"diameter": 6}}, "height": 20, "radius": 1, "draft": 20"#
         )));
         assert!(invalid(&part(
-            r#""diameter": 6, "height": 20, "radius": 1"#
+            r#""shape": {"round": {"diameter": 6}}, "height": 20, "radius": 1"#
         )));
         assert!(!invalid(&part(
-            r#""diameter": 6, "height": 6, "radius": 1"#
+            r#""shape": {"round": {"diameter": 6}}, "height": 6, "radius": 1"#
         )));
     }
 
@@ -2823,7 +3070,7 @@ mod tests {
             let spec: PartSpec = serde_json::from_str(&format!(
                 r#"{{"id": "h", "thickness": 2, "bend_radius": 2, "k_factor": 0.4,
                 "base": {{"outline": [[0, 0], [200, 0], [200, 200], [0, 200]],
-                    "flanged_holes": [{{"id": "c", "at": [100, 100], "diameter": 20, "height": 6,
+                    "flanged_holes": [{{"id": "c", "at": [100, 100], "shape": {{"round": {{"diameter": 20}}}}, "height": 6,
                         "radius": 0, "draft": {draft}, "side": "{side}"}}]}}}}"#
             ))
             .unwrap();

@@ -2948,13 +2948,6 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
     }
     crate::cut::cut_holes(&mut layout, &[inside.clone(), discs.clone()].concat())?;
     crate::cut::cut_cutouts(&mut layout)?;
-    // A flanged hole's pre-hole is the flat's (the cells keep the footprint).
-    let pre: Vec<Hole> = layout
-        .embosses
-        .iter()
-        .filter_map(|e| e.pre_hole())
-        .collect();
-    layout.flat.holes.extend(pre);
     let rings: Vec<(String, Ring)> = layout
         .embosses
         .iter()
@@ -2983,6 +2976,19 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
             )));
         }
     }
+    // A flanged hole's pre-hole is the flat's (the cells keep the footprint).
+    let pre: Vec<Hole> = layout
+        .embosses
+        .iter()
+        .filter_map(|e| e.pre_hole())
+        .collect();
+    layout.flat.holes.extend(pre);
+    let pre: Vec<Ring> = layout
+        .embosses
+        .iter()
+        .filter_map(|e| e.pre_cutout())
+        .collect();
+    layout.flat.cutouts.extend(pre);
     // No cell runs over itself: two features' pieces lie over each other,
     // such as a relief notch running into a neighbouring bend.
     let crossed = layout.cells.iter().find_map(|c| {

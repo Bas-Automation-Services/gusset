@@ -824,7 +824,7 @@ impl Louver {
 /// collar. Seen from the side the sheet leaves the plate over a rounded corner
 /// (`radius` on its inside) and runs along the collar's wall, straight or
 /// drafted inwards, to its end, cut square to the wall. The hole's measures
-/// are its inside wall's: `diameter` where it (extended) meets the plate face
+/// are its inside wall's: its shape where it (extended) meets the plate face
 /// the sheet leaves, and `height` from that face to where it ends. The flat
 /// pattern holds the pre-hole: the collar developed along its neutral fibre
 /// (the corner at the bend's K-factor, then the wall) back into the plate;
@@ -840,7 +840,7 @@ pub struct FlangedHole {
     pub on: Option<String>,
     /// The centre.
     pub at: [f64; 2],
-    pub diameter: f64,
+    pub shape: HoleShape,
     pub height: f64,
     /// The wall's slope from square to the plate, inwards, degrees: 0 for a
     /// straight collar, below 90.
@@ -852,6 +852,25 @@ pub struct FlangedHole {
     /// `up`: the collar rises towards the frame's normal, `down`: away from
     /// it.
     pub side: Side,
+    /// A rectangle's turn, counter-clockwise from the frame's x, degrees.
+    #[serde(default)]
+    pub angle: f64,
+}
+
+/// A flanged hole's inside wall where it meets the plate's face.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HoleShape {
+    Round {
+        diameter: f64,
+    },
+    /// `width` along x, `length` along y (before the turn), corners rounded
+    /// in plan with `corner_radius`.
+    Rectangle {
+        width: f64,
+        length: f64,
+        corner_radius: f64,
+    },
 }
 
 impl FlangedHole {
@@ -861,6 +880,7 @@ impl FlangedHole {
         let mut h = self.clone();
         h.on = None;
         h.at = frame.apply(self.at);
+        h.angle = frame.angle(self.angle);
         if frame.mirrored() {
             h.side = match self.side {
                 Side::Up => Side::Down,

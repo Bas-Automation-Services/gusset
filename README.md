@@ -57,9 +57,10 @@ Made by [Bas Automation Services](https://www.basautomationservices.com).
   two rounded corners, or none where the corners meet; domes (a spherical cap) and beads (a
   cylindrical crown with spherical ends) met straight from the corner. Exact (tori, cones,
   cylinders, spheres); the flat pattern marks the footprint.
-- **Flanged holes:** a hole's edge pressed out of any flat plate into a collar, either way:
-  a corner (sharp or rounded) and a straight or drafted wall, its end cut square to it;
-  exact. The flat pattern holds the pre-hole, the collar developed along its neutral fibre.
+- **Flanged holes:** a round or rectangular hole's edge pressed out of any flat plate into a
+  collar, either way: a corner (sharp or rounded) and a straight or drafted wall, its end cut
+  square to it; exact. The flat pattern holds the pre-hole, the collar developed along its
+  neutral fibre.
 - **Louvers:** a hood pressed out of any flat plate beside a lance, either way, at the sheet's
   thickness: a quarter round hood (cylinders) with spherical ends, leaving the plate over a
   rounded or sharp corner (tori), closed at the lance by two plane faces; exact. The flat
