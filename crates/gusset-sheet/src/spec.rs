@@ -542,6 +542,9 @@ pub enum Seam {
     /// The flange on the edge that starts at the corner runs on over the
     /// other's end.
     ReverseOverlap,
+    /// Both flanges end square, their inner faces' corners the miter gap
+    /// apart: each stops gap / sqrt 2 short of the other's inner face.
+    Butt,
 }
 
 /// The relief at a corner where two flanges meet.

@@ -1419,7 +1419,9 @@ pub(crate) fn layout_cells(spec: &PartSpec) -> Result<Layout, SheetError> {
                 }
                 // The neighbour's inner face, past its edge (a 90-degree bend).
                 let theirs = other.setback + folds[m].radius;
-                let past = if (side == 1) == (seam == Seam::Overlap) {
+                let past = if seam == Seam::Butt {
+                    theirs - gap * std::f64::consts::FRAC_1_SQRT_2
+                } else if (side == 1) == (seam == Seam::Overlap) {
                     theirs + spec.thickness
                 } else {
                     theirs - gap
@@ -3988,6 +3990,8 @@ mod tests {
             (Some(Seam::Miter), 9470.726866, 19039.471423),
             (Some(Seam::Overlap), 9550.123836, 19198.265362),
             (Some(Seam::ReverseOverlap), 9510.123836, 19118.265362),
+            // Square ends taking what the miter takes at 90 degrees.
+            (Some(Seam::Butt), 9470.726866, 19039.471423),
         ] {
             let a = flat_pattern(&part(seam)).unwrap().area();
             assert!((a - area).abs() < 1e-6, "{seam:?}: {a}");

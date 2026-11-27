@@ -1829,6 +1829,11 @@
           "description": "The flange on the edge that starts at the corner runs on over the\nother's end.",
           "type": "string",
           "const": "reverse_overlap"
+        },
+        {
+          "description": "Both flanges end square, their inner faces' corners the miter gap\napart: each stops gap / sqrt 2 short of the other's inner face.",
+          "type": "string",
+          "const": "butt"
         }
       ]
     },
